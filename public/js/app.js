@@ -222,6 +222,13 @@
   const elBtnExportMenu = document.getElementById('btnExportMenu');
   const elExportDropdown = document.getElementById('exportDropdown');
   const elBtnCopyAllMarkdown = document.getElementById('btnCopyAllMarkdown');
+  const elBtnOpenExportModal = document.getElementById('btnOpenExportModal');
+  const elExportModal = document.getElementById('exportModal');
+  const elBtnExportModalClose = document.getElementById('btnExportModalClose');
+  const elBtnCloseExportModal = document.getElementById('btnCloseExportModal');
+  const elBtnModalCopyMarkdown = document.getElementById('btnModalCopyMarkdown');
+  const elExportModalTextarea = document.getElementById('exportModalTextarea');
+  const elExportModalCharCount = document.getElementById('exportModalCharCount');
   const elBtnDownloadMarkdown = document.getElementById('btnDownloadMarkdown');
   const elBtnDownloadHTML = document.getElementById('btnDownloadHTML');
   const elToastContainer = document.getElementById('toastContainer');
@@ -2056,11 +2063,7 @@
           showToast('Pastebox is empty', 'info');
           return;
         }
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(() => {
-            showToast('📋 Copied pastebox text to clipboard!', 'success');
-          });
-        }
+        copyTextToClipboard(text, '📋 Copied pastebox text to clipboard!');
       });
     }
 
@@ -2127,29 +2130,133 @@
     });
   });
 
+  // --- Universal Bulletproof Clipboard Copy Helper ---
+
+  function copyTextToClipboard(text, successToast = '📋 Copied to clipboard!') {
+    if (!text) {
+      showToast('⚠️ No content to copy', 'warning');
+      return;
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => {
+        showToast(successToast, 'success');
+      }).catch((err) => {
+        console.warn('navigator.clipboard.writeText failed, using execCommand fallback:', err);
+        fallbackExecCommandCopy(text, successToast);
+      });
+    } else {
+      fallbackExecCommandCopy(text, successToast);
+    }
+  }
+
+  function fallbackExecCommandCopy(text, successToast) {
+    let textarea = null;
+    try {
+      textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.top = '0';
+      textarea.style.left = '0';
+      textarea.style.width = '2em';
+      textarea.style.height = '2em';
+      textarea.style.padding = '0';
+      textarea.style.border = 'none';
+      textarea.style.outline = 'none';
+      textarea.style.boxShadow = 'none';
+      textarea.style.background = 'transparent';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+
+      const successful = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      textarea = null;
+
+      if (successful) {
+        showToast(successToast, 'success');
+      } else {
+        openExportModal(text);
+      }
+    } catch (err) {
+      if (textarea && textarea.parentNode) {
+        document.body.removeChild(textarea);
+      }
+      console.error('execCommand fallback failed:', err);
+      openExportModal(text);
+    }
+  }
+
   // --- Sharing & URL Link ---
 
   elBtnShare.addEventListener('click', () => {
     const url = window.location.href;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(() => {
-        showToast('🔗 Shareable link copied to clipboard!', 'success');
-      }).catch(() => {
-        fallbackCopyText(url);
-      });
-    } else {
-      fallbackCopyText(url);
-    }
+    copyTextToClipboard(url, '🔗 Shareable link copied to clipboard!');
   });
 
-  function fallbackCopyText(text) {
-    const input = document.createElement('input');
-    input.value = text;
-    document.body.appendChild(input);
-    input.select();
-    document.execCommand('copy');
-    document.body.removeChild(input);
-    showToast('🔗 Link copied to clipboard!', 'success');
+  // --- Markdown Export Formatter ---
+
+  function getExportMarkdown() {
+    if (!state.doc || !state.doc.cells) return '';
+    return state.doc.cells.map((cell, idx) => {
+      const liveTextarea = document.querySelector(`textarea[data-cell-id="${cell.id}"]`);
+      const content = (liveTextarea ? liveTextarea.value : (cell.content || '')).trim();
+      const revName = (cell.reviewerName || '').trim() || (cell.title || '').trim() || `Reviewer ${idx + 1}`;
+      const header = revName.startsWith('#') ? revName : `# ${revName}`;
+      return `${header}\n\n${content}`;
+    }).join('\n\n===\n\n');
+  }
+
+  // --- Export Modal Controller ---
+
+  function openExportModal(text) {
+    const markdown = text !== undefined ? text : getExportMarkdown();
+    if (elExportModalTextarea) {
+      elExportModalTextarea.value = markdown;
+      elExportModalTextarea.scrollTop = 0;
+      if (elExportModalCharCount) {
+        elExportModalCharCount.textContent = `${markdown.length.toLocaleString()} characters`;
+      }
+      setTimeout(() => {
+        elExportModalTextarea.focus();
+        elExportModalTextarea.select();
+        elExportModalTextarea.scrollTop = 0;
+      }, 50);
+    }
+    if (elExportModal) elExportModal.classList.remove('hidden');
+  }
+
+  function closeExportModal() {
+    if (elExportModal) elExportModal.classList.add('hidden');
+  }
+
+  if (elBtnOpenExportModal) {
+    elBtnOpenExportModal.addEventListener('click', () => {
+      openExportModal();
+    });
+  }
+
+  if (elBtnExportModalClose) {
+    elBtnExportModalClose.addEventListener('click', closeExportModal);
+  }
+
+  if (elBtnCloseExportModal) {
+    elBtnCloseExportModal.addEventListener('click', closeExportModal);
+  }
+
+  if (elBtnModalCopyMarkdown) {
+    elBtnModalCopyMarkdown.addEventListener('click', () => {
+      const text = elExportModalTextarea ? elExportModalTextarea.value : getExportMarkdown();
+      copyTextToClipboard(text, '📋 Rebuttal markdown copied to clipboard!');
+    });
+  }
+
+  if (elExportModal) {
+    elExportModal.addEventListener('click', (e) => {
+      if (e.target === elExportModal) closeExportModal();
+    });
   }
 
   // --- Export Menu Actions ---
@@ -2166,16 +2273,14 @@
   // 1. Copy All Markdown
   elBtnCopyAllMarkdown.addEventListener('click', () => {
     if (!state.doc) return;
-    const combined = state.doc.cells.map(c => `<!-- ${c.title || 'Cell'} -->\n${c.content}`).join('\n\n---\n\n');
-    navigator.clipboard.writeText(combined).then(() => {
-      showToast('📋 Entire rebuttal markdown copied to clipboard!', 'success');
-    });
+    const combined = getExportMarkdown();
+    copyTextToClipboard(combined, '📋 Rebuttal markdown copied to clipboard!');
   });
 
   // 2. Download Markdown file
   elBtnDownloadMarkdown.addEventListener('click', () => {
     if (!state.doc) return;
-    const combined = state.doc.cells.map(c => c.content).join('\n\n---\n\n');
+    const combined = getExportMarkdown();
     downloadFile(`${state.doc.id || 'rebuttal'}.md`, 'text/markdown;charset=utf-8', combined);
   });
 
