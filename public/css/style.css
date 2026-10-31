@@ -21,6 +21,7 @@
   --accent-primary: #3b82f6;
   --accent-hover: #2563eb;
   --accent-light: rgba(59, 130, 246, 0.15);
+  --accent-text: #93c5fd; /* readable blue for small text on dark tinted backgrounds */
   
   --success: #10b981;
   --warning: #f59e0b;
@@ -62,6 +63,7 @@ body.theme-light {
   --accent-primary: #2563eb;
   --accent-hover: #1d4ed8;
   --accent-light: rgba(37, 99, 235, 0.1);
+  --accent-text: #1d4ed8;
 
   --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.08);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.08);
@@ -563,6 +565,7 @@ body.theme-light .theme-sun-icon { display: block; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 0.75rem;
   padding: 0 1.5rem;
   backdrop-filter: blur(8px);
 }
@@ -640,7 +643,6 @@ kbd {
   gap: 0.6rem;
   flex: 1;
   min-width: 0;
-  margin: 0 0.75rem;
 }
 
 /* Free up toolbar room for the reviewer pills on narrower screens */
@@ -685,6 +687,8 @@ kbd {
   gap: 0.4rem;
   min-width: 0;
   overflow-x: auto;
+  /* overflow-x also clips vertically; leave room for the pills' hover lift and shadow */
+  padding: 4px 2px;
   scrollbar-width: none;
 }
 
@@ -722,6 +726,23 @@ kbd {
   transform: translateY(0);
 }
 
+/* The review currently scrolled into view */
+.summary-rev-pill.is-current {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fff;
+}
+
+.summary-rev-pill.is-current .pill-rev-name,
+.summary-rev-pill.is-current .pill-rev-pct {
+  color: #fff;
+}
+
+.summary-rev-pill.is-current .pill-rev-count {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
 .summary-rev-pill .pill-rev-name {
   font-weight: 600;
   color: var(--text-primary);
@@ -734,8 +755,8 @@ kbd {
 .summary-rev-pill .pill-rev-count {
   font-family: var(--font-mono);
   font-weight: 700;
-  color: var(--accent-primary);
-  background: var(--bg-tertiary);
+  color: var(--accent-text);
+  background: var(--accent-light);
   padding: 0.05rem 0.35rem;
   border-radius: 3px;
   font-size: 0.72rem;
@@ -1093,8 +1114,18 @@ kbd {
 }
 
 /* Remote peer editing indicator on cell */
-.cell-card.peer-active {
-  border-left-width: 4px;
+/* Colored strip on the left while a collaborator edits this cell, drawn as an overlay
+   so it never changes the card's layout */
+.cell-card.peer-active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--peer-color, var(--accent-primary));
+  z-index: 7;
+  pointer-events: none;
 }
 
 /* Cell Header */
@@ -1516,26 +1547,7 @@ body.view-mode-render .cell-editor-column {
   gap: 0.35rem;
 }
 
-/* Universal Reviewer Font Size Stepper in Quick Toolbar */
-.universal-rev-size-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  font-size: 0.74rem;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  padding: 0.15rem 0.45rem;
-}
-
-.rev-size-label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  user-select: none;
-}
-
-/* Aa Font Size Stepper */
+/* Reviewer Font Size Stepper (A- / A+ in each reviewer panel) */
 .rev-size-pill-wrap {
   display: inline-flex;
   align-items: center;
@@ -1564,13 +1576,10 @@ body.view-mode-render .cell-editor-column {
   color: var(--text-primary);
 }
 
-.rev-size-indicator {
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: var(--accent-primary);
-  padding: 0 0.25rem;
-  cursor: pointer;
-  user-select: none;
+.btn-rev-size-step:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background: transparent;
 }
 
 /* Reviewer Edit Mode Button (Always labeled "Edit", highlighted/ON when active) */
@@ -1793,8 +1802,8 @@ body.block-counts-hidden .editor-block-gutter {
   display: none;
 }
 
-.cell-card.comments-concealed .editor-textarea-wrapper > :not(.editor-clean-view),
-.cell-card.comments-concealed .editor-block-gutter {
+/* The selection mirror stays (it is invisible) so block counts can be measured against the clean view */
+.cell-card.comments-concealed .editor-textarea-wrapper > :not(.editor-clean-view):not(.editor-selection-mirror) {
   display: none;
 }
 
@@ -1831,13 +1840,15 @@ body.block-counts-hidden .editor-block-gutter {
   user-select: none;
 }
 
-.quick-btn.btn-hide-comments.active {
-  background: var(--accent-light);
-  border-color: var(--accent-primary);
-  color: var(--accent-primary);
+.editor-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
 }
 
-.btn-block-counts-toggle {
+/* Small toggle buttons in the editor's count bar (Hide //, ¶ Blocks) */
+.editor-bar-btn {
   flex-shrink: 0;
   background: transparent;
   border: 1px solid var(--border-color);
@@ -1849,11 +1860,11 @@ body.block-counts-hidden .editor-block-gutter {
   cursor: pointer;
 }
 
-.btn-block-counts-toggle:hover {
+.editor-bar-btn:hover {
   color: var(--text-primary);
 }
 
-.btn-block-counts-toggle.active {
+.editor-bar-btn.active {
   color: var(--accent-primary);
   border-color: var(--accent-primary);
 }
@@ -1892,7 +1903,7 @@ body.block-counts-hidden .editor-block-gutter {
   pointer-events: auto;
   cursor: default;
   font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-size: 0.7rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;

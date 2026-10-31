@@ -284,6 +284,50 @@
   const elBtnModalCopyMarkdown = document.getElementById('btnModalCopyMarkdown');
   // Reviewer pills in the quick toolbar scroll sideways; let a plain mouse wheel drive that
   const elToolbarReviewerPills = document.getElementById('summaryReviewersPills');
+
+  // Highlight the toolbar pill of the review currently being read (the card under a
+  // reading line just below the sticky header + toolbar), and keep that pill in view.
+  let currentReviewerCellId = null;
+  function updateCurrentReviewerPill() {
+    if (!elToolbarReviewerPills) return;
+    const toolbar = document.querySelector('.quick-toolbar');
+    const readingLine = (toolbar ? toolbar.getBoundingClientRect().bottom : 0) + 80;
+
+    let currentId = null;
+    for (const card of document.querySelectorAll('.cell-card')) {
+      const rect = card.getBoundingClientRect();
+      if (rect.bottom > readingLine) {
+        currentId = card.dataset.cellId;
+        break;
+      }
+    }
+
+    let currentPill = null;
+    elToolbarReviewerPills.querySelectorAll('.summary-rev-pill').forEach(pill => {
+      const isCurrent = pill.dataset.cellId === currentId;
+      pill.classList.toggle('is-current', isCurrent);
+      if (isCurrent) currentPill = pill;
+    });
+
+    if (currentPill && currentId !== currentReviewerCellId) {
+      const strip = elToolbarReviewerPills.getBoundingClientRect();
+      const rect = currentPill.getBoundingClientRect();
+      if (rect.left < strip.left) elToolbarReviewerPills.scrollLeft -= strip.left - rect.left + 8;
+      else if (rect.right > strip.right) elToolbarReviewerPills.scrollLeft += rect.right - strip.right + 8;
+    }
+    currentReviewerCellId = currentId;
+  }
+
+  let currentPillFrame = 0;
+  const scheduleCurrentReviewerPill = () => {
+    if (currentPillFrame) return;
+    currentPillFrame = requestAnimationFrame(() => {
+      currentPillFrame = 0;
+      updateCurrentReviewerPill();
+    });
+  };
+  window.addEventListener('scroll', scheduleCurrentReviewerPill, { passive: true });
+  window.addEventListener('resize', scheduleCurrentReviewerPill);
   if (elToolbarReviewerPills) {
     elToolbarReviewerPills.addEventListener('wheel', (e) => {
       if (e.deltaY === 0 || elToolbarReviewerPills.scrollWidth <= elToolbarReviewerPills.clientWidth) return;
@@ -313,11 +357,7 @@
   const elBtnPasteboxCopy = document.getElementById('btnPasteboxCopy');
   const elBtnPasteboxClear = document.getElementById('btnPasteboxClear');
 
-  // Universal Reviewer Font Size Stepper in Quick Toolbar
-  const elBtnUniversalSizeDec = document.getElementById('btnUniversalSizeDec');
-  const elUniversalSizeIndicator = document.getElementById('universalSizeIndicator');
-  const elBtnUniversalSizeInc = document.getElementById('btnUniversalSizeInc');
-
+  // Reviewer font size (shared by all reviewer panels; stepper lives in each panel's label row)
   const REV_SIZES = ['sm', 'md', 'lg', 'xl'];
   const REV_SIZE_NAMES = { sm: 'Compact (12px)', md: 'Normal (14px)', lg: 'Large (16px)', xl: 'Extra Large (18px)' };
 
@@ -328,35 +368,23 @@
       el.classList.remove('reviewer-size-sm', 'reviewer-size-md', 'reviewer-size-lg', 'reviewer-size-xl');
       el.classList.add(`reviewer-size-${newSize}`);
     });
-    if (elUniversalSizeIndicator) {
-      elUniversalSizeIndicator.textContent = 'Aa';
-      elUniversalSizeIndicator.title = `Current reviewer font size: ${REV_SIZE_NAMES[newSize]} (Click to cycle)`;
-    }
+    updateReviewerSizeButtons();
     if (notify) {
       showToast(`Reviewer text size: ${REV_SIZE_NAMES[newSize]}`, 'info');
     }
   }
 
-  if (elBtnUniversalSizeDec) {
-    elBtnUniversalSizeDec.addEventListener('click', () => {
-      const idx = REV_SIZES.indexOf(state.reviewerFontSize || 'md');
-      if (idx > 0) setGlobalReviewerFontSize(REV_SIZES[idx - 1]);
-    });
+  function stepReviewerFontSize(delta) {
+    const idx = REV_SIZES.indexOf(state.reviewerFontSize || 'md');
+    const next = idx + delta;
+    if (next >= 0 && next < REV_SIZES.length) setGlobalReviewerFontSize(REV_SIZES[next]);
   }
 
-  if (elBtnUniversalSizeInc) {
-    elBtnUniversalSizeInc.addEventListener('click', () => {
-      const idx = REV_SIZES.indexOf(state.reviewerFontSize || 'md');
-      if (idx < REV_SIZES.length - 1) setGlobalReviewerFontSize(REV_SIZES[idx + 1]);
-    });
-  }
-
-  if (elUniversalSizeIndicator) {
-    elUniversalSizeIndicator.addEventListener('click', () => {
-      const idx = REV_SIZES.indexOf(state.reviewerFontSize || 'md');
-      const nextIdx = (idx + 1) % REV_SIZES.length;
-      setGlobalReviewerFontSize(REV_SIZES[nextIdx]);
-    });
+  // Disable A- / A+ at the smallest / largest size
+  function updateReviewerSizeButtons() {
+    const idx = REV_SIZES.indexOf(state.reviewerFontSize || 'md');
+    document.querySelectorAll('.btn-rev-size-step[data-step="-1"]').forEach(btn => { btn.disabled = idx <= 0; });
+    document.querySelectorAll('.btn-rev-size-step[data-step="1"]').forEach(btn => { btn.disabled = idx >= REV_SIZES.length - 1; });
   }
 
   // Comments Sidebar & Floating bubble elements
@@ -995,7 +1023,24 @@
     const labelActions = document.createElement('div');
     labelActions.className = 'reviewer-label-actions';
 
-    // Aa Font Size Stepper Control
+    // Font Size Stepper (applies to all reviewer panels)
+    const sizeStepper = document.createElement('div');
+    sizeStepper.className = 'rev-size-pill-wrap';
+    sizeStepper.title = 'Reviewer text size (all reviewers)';
+    const sizeIdx = REV_SIZES.indexOf(state.reviewerFontSize || 'md');
+    [[-1, 'A-', 'Smaller reviewer text'], [1, 'A+', 'Larger reviewer text']].forEach(([step, label, title]) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-rev-size-step';
+      btn.dataset.step = step;
+      btn.textContent = label;
+      btn.title = title;
+      btn.disabled = step < 0 ? sizeIdx <= 0 : sizeIdx >= REV_SIZES.length - 1;
+      btn.addEventListener('click', () => stepReviewerFontSize(step));
+      sizeStepper.appendChild(btn);
+    });
+    labelActions.appendChild(sizeStepper);
+
     // Reviewer Edit Toggle Button (Always labeled "✏️ Edit", highlighted/ON when editing)
     const btnToggleMode = document.createElement('button');
     btnToggleMode.type = 'button';
@@ -1230,11 +1275,23 @@
 
     const btnBlockCounts = document.createElement('button');
     btnBlockCounts.type = 'button';
-    btnBlockCounts.className = `btn-block-counts-toggle${state.showBlockCounts ? ' active' : ''}`;
+    btnBlockCounts.className = `editor-bar-btn btn-block-counts-toggle${state.showBlockCounts ? ' active' : ''}`;
     btnBlockCounts.textContent = '¶ Blocks';
     btnBlockCounts.title = state.showBlockCounts ? 'Hide per-block character counts' : 'Show per-block character counts';
     btnBlockCounts.addEventListener('click', () => setShowBlockCounts(!state.showBlockCounts));
-    footer.appendChild(btnBlockCounts);
+
+    // Hide // comments toggle (applies to every editor)
+    const btnHideComments = document.createElement('button');
+    btnHideComments.type = 'button';
+    btnHideComments.className = 'editor-bar-btn btn-hide-comments';
+    btnHideComments.addEventListener('click', () => setHideComments(!state.hideComments));
+    updateHideCommentsButton(btnHideComments);
+
+    const barActions = document.createElement('div');
+    barActions.className = 'editor-bar-actions';
+    barActions.appendChild(btnHideComments);
+    barActions.appendChild(btnBlockCounts);
+    footer.appendChild(barActions);
 
     // Per-block character counts beside the editor, aligned with the text they measure
     const blockGutter = document.createElement('div');
@@ -1744,7 +1801,14 @@
 
   // --- Hide // Comments: per-viewer clean view of every editor (nothing is deleted) ---
 
-  const elBtnToggleHideComments = document.getElementById('btnToggleHideComments');
+  function updateHideCommentsButton(btn) {
+    btn.classList.toggle('active', state.hideComments);
+    btn.setAttribute('aria-pressed', String(state.hideComments));
+    btn.textContent = state.hideComments ? 'Show //' : 'Hide //';
+    btn.title = state.hideComments
+      ? 'Show // comment lines in all editors'
+      : 'Hide // comment lines in all editors (only hides them, nothing is deleted). Click into an editor to see and edit its comments.';
+  }
 
   // Visible (non // or %%) lines of the text, with each line's offset in the full text
   function getCleanLines(text) {
@@ -1781,6 +1845,7 @@
       parts.push(badge);
     }
     cleanView.replaceChildren(...parts);
+    renderBlockGutter(cellId);
   }
 
   // Character offset within the clean text under a viewport point
@@ -1832,16 +1897,13 @@
     if (!card) return;
     renderCleanView(cellId);
     card.classList.add('comments-concealed');
+    renderBlockGutter(cellId);
   }
 
   function setHideComments(hide) {
     state.hideComments = hide;
     localStorage.setItem('rh_hide_comments', hide ? '1' : '0');
-    if (elBtnToggleHideComments) {
-      elBtnToggleHideComments.classList.toggle('active', hide);
-      elBtnToggleHideComments.setAttribute('aria-pressed', String(hide));
-      elBtnToggleHideComments.textContent = hide ? 'Show //' : 'Hide //';
-    }
+    document.querySelectorAll('.btn-hide-comments').forEach(updateHideCommentsButton);
     document.querySelectorAll('.cell-card').forEach(card => {
       const cellId = card.dataset.cellId;
       if (!hide) {
@@ -1855,9 +1917,6 @@
     });
   }
 
-  if (elBtnToggleHideComments) {
-    elBtnToggleHideComments.addEventListener('click', () => setHideComments(!state.hideComments));
-  }
   setHideComments(state.hideComments);
 
   // An editor left revealed after a toolbar click that didn't refocus it hides again on the next outside click
@@ -1877,8 +1936,17 @@
     const mirror = document.getElementById(`measure-mirror-${cellId}`);
     if (!textarea || !gutter || !mirror) return;
 
+    // While // comments are hidden, measure against the clean view (comment lines dropped)
+    const card = document.getElementById(`cell-card-${cellId}`);
+    const concealed = !!card && card.classList.contains('comments-concealed');
+    const allLines = textarea.value.split('\n');
+    const lineNumbers = allLines.map((_, i) => i).filter(i => {
+      const trimmed = allLines[i].trim();
+      return !concealed || (!trimmed.startsWith('//') && !trimmed.startsWith('%%'));
+    });
+    const lines = lineNumbers.map(i => allLines[i]);
+
     // Lay the text out in the hidden mirror, one span per line, to find where each line wraps
-    const lines = textarea.value.split('\n');
     const lineSpans = lines.map(line => {
       const span = document.createElement('span');
       span.textContent = line;
@@ -1904,9 +1972,9 @@
       item.className = `block-gutter-item${block.kind === 'comment' ? ' is-comment' : ''}`;
       item.style.top = `${top}px`;
       item.style.height = `${bottom - top}px`;
-      const lineLabel = block.startLine === block.endLine
-        ? `Line ${block.startLine + 1}`
-        : `Lines ${block.startLine + 1}–${block.endLine + 1}`;
+      const firstLine = lineNumbers[block.startLine] + 1;
+      const lastLine = lineNumbers[block.endLine] + 1;
+      const lineLabel = firstLine === lastLine ? `Line ${firstLine}` : `Lines ${firstLine}–${lastLine}`;
       item.title = `${lineLabel} · ${block.count.toLocaleString()} characters${block.kind === 'comment' ? ' (comment, not counted)' : ''}`;
 
       const count = document.createElement('span');
@@ -2090,6 +2158,7 @@
         const pill = document.createElement('button');
         pill.type = 'button';
         pill.className = 'summary-rev-pill';
+        pill.dataset.cellId = cell.id;
         pill.title = `Jump to ${displayName} • ${chars.toLocaleString()} chars (${sharePct}% of rebuttal)`;
         pill.innerHTML = `
           <span class="pill-rev-name">${escapeHtml(displayName)}</span>
@@ -2110,6 +2179,7 @@
 
         elSummaryReviewersPills.appendChild(pill);
       });
+      updateCurrentReviewerPill();
     }
 
     if (elSummaryBarRight) {
@@ -2191,7 +2261,7 @@
     // Reset all cell card peer highlights
     document.querySelectorAll('.cell-card').forEach(card => {
       card.classList.remove('peer-active');
-      card.style.borderColor = '';
+      card.style.removeProperty('--peer-color');
     });
 
     // Clear peer badges from cell headers
@@ -2207,7 +2277,7 @@
       const card = document.getElementById(`cell-card-${cellId}`);
       if (card) {
         card.classList.add('peer-active');
-        card.style.borderLeftColor = user.color || '#3b82f6';
+        card.style.setProperty('--peer-color', user.color || '#3b82f6');
       }
 
       // Add badge in header
