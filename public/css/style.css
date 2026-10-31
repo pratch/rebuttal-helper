@@ -75,8 +75,13 @@ body.theme-light {
   padding: 0;
 }
 
-html, body {
+html {
   height: 100%;
+}
+
+html, body {
+  /* body must grow with content so the sticky header/toolbar stay pinned on the whole page */
+  min-height: 100%;
   font-family: var(--font-sans);
   background-color: var(--bg-primary);
   color: var(--text-primary);
@@ -1327,7 +1332,11 @@ body.view-mode-render .cell-editor-column {
 .reviewer-content-wrapper {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* Stick below header + quick toolbar and scroll independently of the answer */
+  position: sticky;
+  top: calc(var(--header-height) + var(--quick-toolbar-height));
+  max-height: calc(100vh - var(--header-height) - var(--quick-toolbar-height));
+  overflow: hidden; /* only the review text box scrolls; name/score/label stay put */
 }
 
 .reviewer-header-bar {
@@ -1430,7 +1439,8 @@ body.view-mode-render .cell-editor-column {
   padding: 0.65rem 0.75rem;
   display: flex;
   flex-direction: column;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 0.45rem;
 }
 
@@ -1592,13 +1602,12 @@ body.view-mode-render .cell-editor-column {
   border-color: var(--accent-primary);
 }
 
-/* Markdown Rendered Preview for Reviewer - full height, no scrollbar */
+/* Markdown Rendered Preview for Reviewer - scrolls on its own inside the sticky panel */
 .reviewer-comment-preview {
   width: 100%;
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 140px;
-  max-height: none !important;
-  overflow-y: visible !important;
+  overflow-y: auto;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -1688,10 +1697,9 @@ body.view-mode-render .cell-editor-column {
 
 .reviewer-comment-textarea {
   width: 100%;
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 140px;
-  max-height: none !important;
-  overflow-y: hidden !important;
+  overflow-y: auto;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -3247,6 +3255,11 @@ mark.comment-highlight-mark.active-flash {
   .cell-editor-column {
     border-right: none;
     border-bottom: 1px solid var(--border-color);
+  }
+  .reviewer-content-wrapper {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
   }
   .comments-sidebar {
     width: 100%;

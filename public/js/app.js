@@ -1333,10 +1333,11 @@
   // Auto-resize reviewer textarea to fit content
   function autoResizeReviewerTextarea(textarea) {
     if (!textarea) return;
+    const scrollTop = textarea.scrollTop;
     textarea.style.height = 'auto';
-    const newHeight = Math.max(140, textarea.scrollHeight);
-    textarea.style.minHeight = `${newHeight}px`;
-    textarea.style.height = '100%';
+    // Grow to fit content; the sticky panel's max-height makes it shrink and scroll when too long
+    textarea.style.height = `${Math.max(140, textarea.scrollHeight)}px`;
+    textarea.scrollTop = scrollTop;
   }
 
   // Create hoverable divider '+' button between cells
@@ -1659,7 +1660,7 @@
 
     const stats = [
       stat('Characters', totalChars),
-      stat('Characters+comments', rawTotal),
+      stat('+Comments', rawTotal),
       stat('Words', words),
     ];
 
