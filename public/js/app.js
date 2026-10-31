@@ -1086,9 +1086,8 @@
     textareaWrap.appendChild(backdrop);
     textareaWrap.appendChild(cursorContainer);
     textareaWrap.appendChild(textarea);
-    editorCol.appendChild(textareaWrap);
 
-    // Footer under editor: Real-time Character Counter
+    // Sticky header above editor: Real-time Character Counter
     const footer = document.createElement('div');
     footer.className = 'cell-editor-footer';
 
@@ -1098,6 +1097,7 @@
     footer.appendChild(counterDiv);
 
     editorCol.appendChild(footer);
+    editorCol.appendChild(textareaWrap);
 
     // =========================================================
     // Column 3: Rendered Markdown & Math Preview (Right)
@@ -1146,6 +1146,12 @@
 
     // Event Listeners for Editor
     let debounceTimer = null;
+
+    // Refresh the info bar's "Selected" count whenever the highlighted range changes
+    const refreshSelectionCount = () => updateCellCharCount(cell.id, textarea.value);
+    ['select', 'mouseup', 'keyup', 'focus', 'blur'].forEach((evt) =>
+      textarea.addEventListener(evt, refreshSelectionCount)
+    );
 
     textarea.addEventListener('input', () => {
       const text = textarea.value;
@@ -1646,22 +1652,27 @@
     const rawTotal = (text || '').length;
     const countable = getCountableText(text);
     const totalChars = countable.length;
-    const noSpaceChars = countable.replace(/\s/g, '').length;
     const words = countable.trim().split(/\s+/).filter(Boolean).length;
-    const excludedChars = rawTotal - totalChars;
 
-    let excludedHint = '';
-    if (excludedChars > 0) {
-      excludedHint = `<span class="comment-excluded-indicator">(${excludedChars.toLocaleString()} chars in comments excluded)</span>`;
+    const stat = (label, value) =>
+      `<span class="char-stat"><span class="char-stat-label">${label}</span><span class="char-count-pill">${value.toLocaleString()}</span></span>`;
+
+    const stats = [
+      stat('Characters', totalChars),
+      stat('Characters+comments', rawTotal),
+      stat('Words', words),
+    ];
+
+    // Highlighted text in this cell's editor (only while it has focus)
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    if (textarea && document.activeElement === textarea) {
+      const selected = Math.abs(textarea.selectionEnd - textarea.selectionStart);
+      if (selected > 0) {
+        stats.push(`<span class="char-stat char-stat-selected"><span class="char-stat-label">Selected</span><span class="char-count-pill">${selected.toLocaleString()}</span></span>`);
+      }
     }
 
-    counterEl.innerHTML = `
-      <span>Characters (with spaces): <strong class="char-count-strong">${totalChars.toLocaleString()}</strong>${excludedHint}</span>
-      <span>•</span>
-      <span>No spaces: <span class="char-count-pill">${noSpaceChars.toLocaleString()}</span></span>
-      <span>•</span>
-      <span>Words: <span class="char-count-pill">${words.toLocaleString()}</span></span>
-    `;
+    counterEl.innerHTML = stats.join('');
   }
 
   function updateGlobalCharCount() {
