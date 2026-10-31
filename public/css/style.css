@@ -1788,6 +1788,55 @@ body.block-counts-hidden .editor-block-gutter {
   display: none;
 }
 
+/* Hide // comments: the editor layers give way to a read-only clean view until clicked */
+.editor-clean-view {
+  display: none;
+}
+
+.cell-card.comments-concealed .editor-textarea-wrapper > :not(.editor-clean-view),
+.cell-card.comments-concealed .editor-block-gutter {
+  display: none;
+}
+
+.cell-card.comments-concealed .editor-clean-view {
+  display: block;
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 180px;
+  box-sizing: border-box;
+  padding: 1rem 1.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  cursor: text;
+}
+
+.editor-clean-badge {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+.quick-btn.btn-hide-comments.active {
+  background: var(--accent-light);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
 .btn-block-counts-toggle {
   flex-shrink: 0;
   background: transparent;

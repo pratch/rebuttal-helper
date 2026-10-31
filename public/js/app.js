@@ -35,7 +35,8 @@
     commentsFilter: 'open',
     activeHighlightSelection: null,
     reviewerFontSize: localStorage.getItem('rh_rev_font_size') || 'md', // sm | md | lg | xl
-    showBlockCounts: localStorage.getItem('rh_show_block_counts') !== '0'
+    showBlockCounts: localStorage.getItem('rh_show_block_counts') !== '0',
+    hideComments: localStorage.getItem('rh_hide_comments') === '1'
   };
 
   // Show/hide the per-block character count column beside every editor
@@ -419,7 +420,7 @@
   const viewModeBtns = document.querySelectorAll('.view-btn');
 
   // Quick Format helper buttons
-  const quickFormatBtns = document.querySelectorAll('.quick-btn');
+  const quickFormatBtns = document.querySelectorAll('.quick-btn[data-insert]');
 
   // --- Initialize Socket.IO ---
   const socket = io();
@@ -756,8 +757,9 @@
 
   function createCellElement(cell, index) {
     const card = document.createElement('div');
-    card.className = 'cell-card';
+    card.className = state.hideComments ? 'cell-card comments-concealed' : 'cell-card';
     card.id = `cell-card-${cell.id}`;
+    if (state.hideComments) requestAnimationFrame(() => renderCleanView(cell.id));
     card.dataset.cellId = cell.id;
 
     // Header
@@ -1203,6 +1205,17 @@
     textareaWrap.appendChild(textarea);
     textareaWrap.appendChild(selectionPopup);
 
+    // Read-only view without // and %% lines, shown in place of the editor while comments are hidden
+    const cleanView = document.createElement('div');
+    cleanView.id = `clean-view-${cell.id}`;
+    cleanView.className = 'editor-clean-view';
+    cleanView.title = 'Comments hidden - click to edit (shows this cell\'s comments)';
+    cleanView.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      revealCellComments(cell.id, getCleanViewOffsetAt(cleanView, e.clientX, e.clientY));
+    });
+    textareaWrap.appendChild(cleanView);
+
     textareaWrap.addEventListener('mousemove', (e) => updatePeerTagHover(cell.id, e));
     textareaWrap.addEventListener('mouseleave', () => updatePeerTagHover(cell.id, null));
 
@@ -1352,6 +1365,12 @@
           });
         }, 150);
       }
+    });
+
+    textarea.addEventListener('blur', (e) => {
+      // Toolbar buttons act on this editor and refocus it, so don't flip back to the clean view
+      if (e.relatedTarget && e.relatedTarget.closest('.quick-toolbar')) return;
+      concealCellComments(cell.id);
     });
 
     textarea.addEventListener('focus', () => {
@@ -1720,7 +1739,137 @@
     backdrop.innerHTML = buildBackdropHtml(textarea.value, cellComments);
     syncBackdropScroll(textarea, backdrop);
     renderBlockGutter(cellId);
+    renderCleanView(cellId);
   }
+
+  // --- Hide // Comments: per-viewer clean view of every editor (nothing is deleted) ---
+
+  const elBtnToggleHideComments = document.getElementById('btnToggleHideComments');
+
+  // Visible (non // or %%) lines of the text, with each line's offset in the full text
+  function getCleanLines(text) {
+    const lines = [];
+    let offset = 0;
+    text.split('\n').forEach(line => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('//') && !trimmed.startsWith('%%')) lines.push({ text: line, offset });
+      offset += line.length + 1;
+    });
+    return lines;
+  }
+
+  function renderCleanView(cellId) {
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const cleanView = document.getElementById(`clean-view-${cellId}`);
+    if (!textarea || !cleanView || !state.hideComments) return;
+
+    const text = textarea.value;
+    const cleanLines = getCleanLines(text);
+    const hiddenCount = text.split('\n').length - cleanLines.length;
+    const cellComments = (state.doc && Array.isArray(state.doc.comments))
+      ? state.doc.comments.filter(c => c.cellId === cellId)
+      : [];
+
+    const body = document.createElement('div');
+    body.className = 'editor-clean-text';
+    body.innerHTML = buildBackdropHtml(cleanLines.map(l => l.text).join('\n'), cellComments);
+    const parts = [body];
+    if (hiddenCount > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'editor-clean-badge';
+      badge.textContent = `${hiddenCount} // hidden`;
+      parts.push(badge);
+    }
+    cleanView.replaceChildren(...parts);
+  }
+
+  // Character offset within the clean text under a viewport point
+  function getCleanViewOffsetAt(cleanView, x, y) {
+    const body = cleanView.querySelector('.editor-clean-text');
+    if (!body) return 0;
+    let node = null;
+    let nodeOffset = 0;
+    if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(x, y);
+      if (pos) { node = pos.offsetNode; nodeOffset = pos.offset; }
+    } else if (document.caretRangeFromPoint) {
+      const range = document.caretRangeFromPoint(x, y);
+      if (range) { node = range.startContainer; nodeOffset = range.startOffset; }
+    }
+    if (!node || !body.contains(node)) return body.textContent.length;
+    const range = document.createRange();
+    range.setStart(body, 0);
+    range.setEnd(node, nodeOffset);
+    return range.toString().length;
+  }
+
+  // Map an offset in the clean text back to the full editor text
+  function cleanOffsetToFull(text, cleanOffset) {
+    const cleanLines = getCleanLines(text);
+    let remaining = cleanOffset;
+    for (const line of cleanLines) {
+      if (remaining <= line.text.length) return line.offset + remaining;
+      remaining -= line.text.length + 1;
+    }
+    return text.length;
+  }
+
+  function revealCellComments(cellId, cleanOffset) {
+    const card = document.getElementById(`cell-card-${cellId}`);
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    if (!card || !textarea) return;
+    card.classList.remove('comments-concealed');
+    autoResizeTextarea(textarea);
+    renderEditorBackdrop(cellId);
+    const pos = cleanOffsetToFull(textarea.value, cleanOffset || 0);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(pos, pos);
+  }
+
+  function concealCellComments(cellId) {
+    if (!state.hideComments) return;
+    const card = document.getElementById(`cell-card-${cellId}`);
+    if (!card) return;
+    renderCleanView(cellId);
+    card.classList.add('comments-concealed');
+  }
+
+  function setHideComments(hide) {
+    state.hideComments = hide;
+    localStorage.setItem('rh_hide_comments', hide ? '1' : '0');
+    if (elBtnToggleHideComments) {
+      elBtnToggleHideComments.classList.toggle('active', hide);
+      elBtnToggleHideComments.setAttribute('aria-pressed', String(hide));
+      elBtnToggleHideComments.textContent = hide ? 'Show //' : 'Hide //';
+    }
+    document.querySelectorAll('.cell-card').forEach(card => {
+      const cellId = card.dataset.cellId;
+      if (!hide) {
+        card.classList.remove('comments-concealed');
+        const textarea = document.getElementById(`textarea-${cellId}`);
+        if (textarea) autoResizeTextarea(textarea);
+        renderEditorBackdrop(cellId);
+      } else if (document.activeElement !== document.getElementById(`textarea-${cellId}`)) {
+        concealCellComments(cellId);
+      }
+    });
+  }
+
+  if (elBtnToggleHideComments) {
+    elBtnToggleHideComments.addEventListener('click', () => setHideComments(!state.hideComments));
+  }
+  setHideComments(state.hideComments);
+
+  // An editor left revealed after a toolbar click that didn't refocus it hides again on the next outside click
+  document.addEventListener('mousedown', (e) => {
+    if (!state.hideComments || e.target.closest('.quick-toolbar')) return;
+    document.querySelectorAll('.cell-card:not(.comments-concealed)').forEach(card => {
+      const textarea = document.getElementById(`textarea-${card.dataset.cellId}`);
+      if (textarea && document.activeElement !== textarea && !card.querySelector('.editor-textarea-wrapper').contains(e.target)) {
+        concealCellComments(card.dataset.cellId);
+      }
+    });
+  });
 
   function renderBlockGutter(cellId) {
     const textarea = document.getElementById(`textarea-${cellId}`);
@@ -2338,6 +2487,15 @@
   });
 
   // --- Format Helpers (Insert text into current active editor) ---
+
+  if (elBtnToggleLineComment) {
+    elBtnToggleLineComment.addEventListener('click', () => {
+      const textarea = state.activeFocusedTextarea || document.querySelector('.cell-textarea');
+      if (!textarea) return;
+      textarea.focus();
+      toggleLineCommentOnTextarea(textarea);
+    });
+  }
 
   quickFormatBtns.forEach(btn => {
     btn.addEventListener('click', () => {

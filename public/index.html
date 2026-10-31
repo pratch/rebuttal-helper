@@ -72,11 +72,10 @@
       </div>
 
       <!-- Comments Toggle Button (Right Side Panel) -->
-      <button class="btn btn-secondary btn-sm" id="btnToggleComments" title="View inline collaborator comments on the right side">
+      <button class="btn btn-secondary btn-sm" id="btnToggleComments" title="Comments: view inline collaborator comments on the right side" aria-label="Comments">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
         </svg>
-        <span>Comments</span>
         <span class="comments-badge-count" id="commentsCountBadge">0</span>
       </button>
 
@@ -164,8 +163,8 @@
       <button class="quick-btn" data-insert="**" data-insert-end="**" title="Bold (**text**)"><strong>B</strong></button>
       <button class="quick-btn" data-insert="*" data-insert-end="*" title="Italic (*text*)"><em>I</em></button>
       <button class="quick-btn" data-insert="$" data-insert-end="$" title="Inline Math ($formula$)">$x$</button>
-      <button class="quick-btn" data-insert="> **" data-insert-end="**: *" title="Reviewer Quote (> **Rx.y**: *...*)">❝ Quote</button>
-      <button class="quick-btn" data-insert="| Metric | Ours | Baseline |\n| :--- | :--- | :--- |\n| PSNR | **28.4** | 26.0 |\n" data-insert-end="" title="Insert Table">📊 Table</button>
+      <button class="quick-btn" data-insert="> **" data-insert-end="**: *" title="Reviewer Quote (> **Rx.y**: *...*)">❝</button>
+      <button class="quick-btn" data-insert="| Metric | Ours | Baseline |\n| :--- | :--- | :--- |\n| PSNR | **28.4** | 26.0 |\n" data-insert-end="" title="Insert Table">📊</button>
       <button class="quick-btn" data-insert="`" data-insert-end="`" title="Inline Code (`code`)">&lt;/&gt;</button>
       <button class="quick-btn btn-comment-line" id="btnToggleLineComment" title="Comment/Uncomment line(s) (Ctrl + /) - excluded from character count">// Comment</button>
     </div>
@@ -187,6 +186,7 @@
       </div>
     </div>
     <div class="quick-tools-right">
+      <button class="quick-btn btn-hide-comments" id="btnToggleHideComments" aria-pressed="false" title="Hide // comment lines in all editors (only hides them, nothing is deleted). Click into an editor to see and edit its comments.">Hide //</button>
       <!-- Universal Reviewer Font Size Stepper -->
       <div class="universal-rev-size-wrap" title="Universal reviewer comment font size">
         <span class="rev-size-label">Reviewer Font:</span>
@@ -198,7 +198,7 @@
       </div>
 
       <span class="keyboard-shortcuts-pill" title="Useful keyboard shortcuts">
-        <kbd>Ctrl</kbd> + <kbd>/</kbd> to comment line (excluded from count)
+        <kbd>Ctrl</kbd> + <kbd>/</kbd> to comment line
       </span>
       <button class="btn btn-outline btn-xs" id="btnInsertTemplate">
         <span>+ Template Cell</span>
