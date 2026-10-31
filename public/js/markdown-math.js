@@ -21,36 +21,44 @@
    * into sanitized HTML with KaTeX rendered equations.
    *
    * @param {string} text - Raw markdown with possible math formulas
+   * @param {object} [options]
+   * @param {boolean} [options.sourceMap] - Wrap each top-level block in
+   *   <div class="md-block" data-src-start data-src-end> giving the 0-based
+   *   source line range it came from (used for editor/preview scroll sync)
    * @returns {string} Safe HTML string
    */
-  function renderMarkdownWithMath(text) {
+  function renderMarkdownWithMath(text, options = {}) {
     if (!text || typeof text !== 'string') return '';
 
-    // Strip commented out lines starting with // or %% so they do not show in rendered output
+    // Strip commented out lines starting with // or %% so they do not show in rendered output,
+    // remembering which source line each remaining line came from
+    const sourceLineOf = [];
     const cleanText = text.split('\n')
-      .filter(line => {
+      .filter((line, i) => {
         const trimmed = line.trim();
-        return !trimmed.startsWith('//') && !trimmed.startsWith('%%');
+        const keep = !trimmed.startsWith('//') && !trimmed.startsWith('%%');
+        if (keep) sourceLineOf.push(i);
+        return keep;
       })
       .join('\n');
 
     const mathStore = [];
 
-    // Helper to store math and return a placeholder
-    const storeMath = (mathCode, isBlock) => {
+    // Helper to store math and return a placeholder (records how many newlines it replaced)
+    const storeMath = (mathCode, isBlock, original) => {
       const idx = mathStore.length;
-      mathStore.push({ math: mathCode, isBlock });
+      mathStore.push({ math: mathCode, isBlock, newlines: (original.match(/\n/g) || []).length });
       return `%%MATH_${isBlock ? 'BLOCK' : 'INLINE'}_${idx}%%`;
     };
 
     // 1. Protect display math $$ ... $$
     let processed = cleanText.replace(/\$\$([\s\S]+?)\$\$/g, (match, mathContent) => {
-      return storeMath(mathContent.trim(), true);
+      return storeMath(mathContent.trim(), true, match);
     });
 
     // Also support \[ ... \] block math
     processed = processed.replace(/\\\[([\s\S]+?)\\\]/g, (match, mathContent) => {
-      return storeMath(mathContent.trim(), true);
+      return storeMath(mathContent.trim(), true, match);
     });
 
     // 2. Protect inline math $ ... $ (excluding escaped \$ and currency like $50 or $$)
@@ -58,17 +66,19 @@
     processed = processed.replace(/(^|[^\\])\$([^\$\n\r]+?)\$/g, (match, prefix, mathContent) => {
       // Avoid matching empty or invalid single char dollar signs
       if (!mathContent.trim()) return match;
-      return prefix + storeMath(mathContent.trim(), false);
+      return prefix + storeMath(mathContent.trim(), false, match);
     });
 
     // Also support \( ... \) inline math
     processed = processed.replace(/\\\(([\s\S]+?)\\\)/g, (match, mathContent) => {
-      return storeMath(mathContent.trim(), false);
+      return storeMath(mathContent.trim(), false, match);
     });
 
     // 3. Render Markdown with Marked
     let html = '';
-    if (window.marked && typeof window.marked.parse === 'function') {
+    if (options.sourceMap && window.marked && typeof window.marked.lexer === 'function') {
+      html = renderBlocksWithSourceLines(processed, mathStore, sourceLineOf);
+    } else if (window.marked && typeof window.marked.parse === 'function') {
       html = window.marked.parse(processed);
     } else {
       // Fallback if marked is loading
@@ -108,6 +118,53 @@
       });
     }
 
+    return html;
+  }
+
+  // Render top-level tokens one at a time, each wrapped with the source lines it spans
+  function renderBlocksWithSourceLines(processed, mathStore, sourceLineOf) {
+    // Newlines in a raw chunk, counting those collapsed into math placeholders
+    const countLines = (raw) => {
+      let n = (raw.match(/\n/g) || []).length;
+      raw.replace(/%%MATH_(?:BLOCK|INLINE)_(\d+)%%/g, (m, idx) => {
+        n += (mathStore[parseInt(idx, 10)] || {}).newlines || 0;
+        return m;
+      });
+      return n;
+    };
+    const toSource = (cleanLine) =>
+      sourceLineOf[Math.min(Math.max(cleanLine, 0), sourceLineOf.length - 1)] ?? 0;
+
+    let line = 0; // current line in the comment-stripped text
+    let html = '';
+    window.marked.lexer(processed).forEach(token => {
+      const raw = token.raw || '';
+      if (token.type !== 'space') {
+        const leading = raw.match(/^\n*/)[0].length;
+        const body = raw.slice(leading).replace(/\n+$/, '');
+        const start = line + leading;
+        const end = start + countLines(body);
+        // Finer ranges for list items and table rows: data-src-parts="start-end,..." in DOM order
+        const parts = [];
+        if (token.type === 'list' && Array.isArray(token.items)) {
+          let itemLine = start;
+          token.items.forEach(item => {
+            const itemRaw = item.raw || '';
+            parts.push([itemLine, itemLine + countLines(itemRaw.replace(/\n+$/, ''))]);
+            itemLine += countLines(itemRaw);
+          });
+        } else if (token.type === 'table' && Array.isArray(token.rows)) {
+          parts.push([start, start]); // header row; the |---| separator line has no row
+          token.rows.forEach((_, i) => parts.push([start + 2 + i, start + 2 + i]));
+        }
+        const partsAttr = parts.length
+          ? ` data-src-kind="${token.type}" data-src-parts="${parts.map(([a, b]) => `${toSource(a)}-${toSource(b)}`).join(',')}"`
+          : '';
+        html += `<div class="md-block" data-src-start="${toSource(start)}" data-src-end="${toSource(end)}"${partsAttr}>`
+          + window.marked.parser([token]) + '</div>';
+      }
+      line += countLines(raw);
+    });
     return html;
   }
 

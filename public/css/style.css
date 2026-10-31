@@ -1917,9 +1917,16 @@ body.view-mode-render .cell-editor-column {
   white-space: nowrap;
 }
 
+.block-gutter-item.is-single-line::before {
+  display: none;
+}
+
 .block-gutter-item.is-comment::before {
+  left: -3px; /* keeps the thinner 1px stroke centred on the column border */
+  border-width: 1px;
   border-color: var(--text-muted);
   border-style: dashed;
+  border-left: none; /* after border-style, which would otherwise bring the left edge back */
 }
 
 .block-gutter-item.is-comment .block-gutter-count {
@@ -2207,12 +2214,28 @@ body.view-mode-reviewer-code .block-gutter-count {
   line-height: 1.65;
   flex: 1;
   overflow: visible;
+  position: relative; /* block offsets for scroll sync are measured from here; moved via transform */
+  will-change: transform; /* own compositor layer: sliding it doesn't repaint the text */
 }
 
 .markdown-preview {
   color: var(--text-primary);
   font-size: 0.92rem;
   line-height: 1.65;
+}
+
+/* Rounded orange bar in the right margin beside the rendered line(s) for the editor caret's row */
+.preview-cursor-bar {
+  position: absolute;
+  width: 4px;
+  border-radius: 2px;
+  background: #f97316;
+  pointer-events: none;
+  transition: top 0.18s ease, height 0.18s ease, left 0.18s ease, opacity 0.15s ease;
+}
+
+.preview-cursor-bar.is-hidden {
+  opacity: 0;
 }
 
 /* Markdown typography styling */

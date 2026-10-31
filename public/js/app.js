@@ -40,6 +40,14 @@
     commentsHiddenCells: loadCellIdSet('rh_comments_hidden_cells')
   };
 
+  // Per-cell editor line boxes (source line -> {top, bottom} px from the editor's top), used to
+  // keep the preview aligned with the raw text (see syncPreviewScroll)
+  const cellLineBoxes = new Map();
+  // cellId -> { line, rowStart, rowEnd } for the editor caret's source line and wrapped row
+  // (null when the editor isn't focused)
+  const previewCursorLines = new Map();
+  const previewCursorBars = new Map(); // cellId -> the reusable caret bar element
+
   function loadCellIdSet(key) {
     try {
       return new Set(JSON.parse(localStorage.getItem(key) || '[]'));
@@ -336,6 +344,246 @@
       else if (rect.right > strip.right) elToolbarReviewerPills.scrollLeft += rect.right - strip.right + 8;
     }
     currentReviewerCellId = currentId;
+  }
+
+  // --- Editor/preview scroll sync ---
+  // The raw text is usually much taller than its preview (comment lines, line breaks), so slide
+  // each preview down inside its column to keep the rendered block for the text at the reading
+  // line level with that text. Anchors pair each rendered block with its source line range;
+  // positions in between are interpolated, so comment-only stretches just pause the preview.
+  //
+  // The offset is a piecewise-linear function of the page scroll position. Where supported it is
+  // compiled into a scroll-driven CSS animation, so the browser moves the preview in the same frame
+  // as the scroll (no lag or jitter); otherwise it is applied from a scroll listener.
+  const supportsScrollTimeline = typeof CSS !== 'undefined' && CSS.supports('animation-timeline: scroll()');
+  const previewSyncStyle = document.createElement('style');
+  document.head.appendChild(previewSyncStyle);
+  let previewSyncGeneration = 0;
+  const previewSyncCurves = new Map(); // cellId -> smoothed [[scrollY, offset], ...] (fallback path)
+
+  // Offset curve for one cell as [scrollY, offset] points (offset held constant beyond the ends)
+  function measurePreviewSyncCurve(cellId, previewEl, readingLine, scrollY) {
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const wrap = textarea && textarea.closest('.editor-textarea-wrapper');
+    const lineBoxes = cellLineBoxes.get(cellId);
+    if (!wrap || !lineBoxes || !wrap.offsetHeight || !previewEl.offsetHeight || !previewEl.offsetParent) return null;
+
+    const blocks = previewEl.querySelectorAll(':scope > .md-block');
+    if (!blocks.length) return null;
+
+    // How far the preview can move without leaving its column
+    const lastBlock = blocks[blocks.length - 1];
+    const room = previewEl.clientHeight - (lastBlock.offsetTop + lastBlock.offsetHeight);
+    if (room <= 0) return null;
+
+    // [editor y, preview y] pairs, both measured from the top of their own content
+    let anchors = [];
+    blocks.forEach(block => {
+      const start = lineBoxes.get(Number(block.dataset.srcStart));
+      const end = lineBoxes.get(Number(block.dataset.srcEnd));
+      if (!start || !end) return;
+      anchors.push([start.top, block.offsetTop], [end.bottom, block.offsetTop + block.offsetHeight]);
+    });
+    if (!anchors.length) return null;
+    anchors.sort((x, y) => x[0] - y[0]);
+    // Never let the preview run backwards: preview positions must not decrease
+    let maxPreviewY = -Infinity;
+    anchors = anchors.map(([e, p]) => [e, (maxPreviewY = Math.max(maxPreviewY, p))]);
+
+    // Untransformed page positions of the editor text and the preview
+    const wrapTop = wrap.getBoundingClientRect().top + scrollY;
+    const parent = previewEl.offsetParent;
+    const previewTop = parent.getBoundingClientRect().top + scrollY + parent.clientTop + previewEl.offsetTop;
+
+    // With the reading line at editor y = e: offset = e + (wrapTop - previewTop) - previewY(e)
+    const shift = wrapTop - previewTop;
+    const raw = anchors.map(([e, p]) => [e, e + shift - p]);
+    // Insert points where the offset crosses its limits, then clamp
+    const points = [raw[0]];
+    for (let i = 1; i < raw.length; i++) {
+      const [e0, f0] = raw[i - 1];
+      const [e1, f1] = raw[i];
+      [0, room].forEach(limit => {
+        if ((f0 - limit) * (f1 - limit) < 0) {
+          const t = (limit - f0) / (f1 - f0);
+          points.push([e0 + t * (e1 - e0), limit]);
+        }
+      });
+      points.push(raw[i]);
+    }
+    points.sort((x, y) => x[0] - y[0]);
+
+    // Editor y at the reading line -> page scroll position
+    const curve = points.map(([e, f]) => [e + wrapTop - readingLine, Math.min(Math.max(f, 0), room)]);
+    return curve;
+  }
+
+  // Smoothed motion: the raw curve changes speed abruptly (about 0.7x page speed through a
+  // paragraph, a dead stop across comment lines, faster around tall tables), which looks jerky
+  // under accelerated trackpad scrolling. Sample it and run a moving average twice (a triangular
+  // kernel) so the preview eases between speeds. Averaging keeps it within the column and never
+  // makes it move against the scroll.
+  const PREVIEW_SYNC_SAMPLE = 8;   // px of scroll between samples
+  const PREVIEW_SYNC_SMOOTH = 120; // px of scroll on each side the speed changes are spread over
+
+  function smoothedPreviewFrames(curve, start, end) {
+    const h = PREVIEW_SYNC_SAMPLE;
+    const radius = Math.max(1, Math.round(PREVIEW_SYNC_SMOOTH / h / 2));
+    const pad = radius * 2 * h;
+    const n = Math.ceil((end - start + 2 * pad) / h) + 1;
+    const xs = Array.from({ length: n }, (_, i) => start - pad + i * h);
+    let ys = xs.map(x => previewOffsetAt(curve, x));
+
+    const boxBlur = (values) => values.map((_, i) => {
+      let sum = 0;
+      let count = 0;
+      for (let j = Math.max(0, i - radius); j <= Math.min(values.length - 1, i + radius); j++) {
+        sum += values[j];
+        count++;
+      }
+      return sum / count;
+    });
+    ys = boxBlur(boxBlur(ys));
+
+    const at = (x) => {
+      const i = Math.min(Math.max(Math.floor((x - xs[0]) / h), 0), n - 2);
+      const t = (x - xs[i]) / h;
+      return ys[i] + (ys[i + 1] - ys[i]) * Math.min(Math.max(t, 0), 1);
+    };
+    const frames = [[start, at(start)]];
+    xs.forEach((x, i) => { if (x > start && x < end) frames.push([x, ys[i]]); });
+    frames.push([end, at(end)]);
+    return simplifyFrames(frames, 0.25);
+  }
+
+  // Drop samples that lie within tol px of a straight line between their neighbours
+  function simplifyFrames(frames, tol) {
+    if (frames.length <= 2) return frames;
+    const keep = [frames[0]];
+    let anchor = 0;
+    for (let i = 2; i < frames.length; i++) {
+      const [x0, y0] = frames[anchor];
+      const [x1, y1] = frames[i];
+      let ok = true;
+      for (let j = anchor + 1; j < i && ok; j++) {
+        const [x, y] = frames[j];
+        ok = Math.abs(y0 + ((x - x0) / (x1 - x0)) * (y1 - y0) - y) <= tol;
+      }
+      if (!ok) {
+        anchor = i - 1;
+        keep.push(frames[anchor]);
+      }
+    }
+    keep.push(frames[frames.length - 1]);
+    return keep;
+  }
+
+  function framesValueAt(frames, x) {
+    if (x <= frames[0][0]) return frames[0][1];
+    const last = frames[frames.length - 1];
+    if (x >= last[0]) return last[1];
+    let i = 0;
+    while (frames[i + 1][0] < x) i++;
+    const [x0, y0] = frames[i];
+    const [x1, y1] = frames[i + 1];
+    return x1 > x0 ? y0 + ((x - x0) / (x1 - x0)) * (y1 - y0) : y1;
+  }
+
+  function previewOffsetAt(curve, scrollY) {
+    if (scrollY <= curve[0][0]) return curve[0][1];
+    const last = curve[curve.length - 1];
+    if (scrollY >= last[0]) return last[1];
+    let i = 0;
+    while (curve[i + 1][0] < scrollY) i++;
+    const [s0, o0] = curve[i];
+    const [s1, o1] = curve[i + 1];
+    return s1 > s0 ? o0 + ((scrollY - s0) / (s1 - s0)) * (o1 - o0) : o1;
+  }
+
+  function buildPreviewScrollSync() {
+    const toolbar = document.querySelector('.quick-toolbar');
+    const readingLine = (toolbar ? toolbar.getBoundingClientRect().bottom : 0) + 80;
+    const scrollY = window.scrollY;
+    const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const generation = ++previewSyncGeneration;
+
+    // Measure everything first, then write, so layout is computed only once
+    const results = [];
+    document.querySelectorAll('.cell-card').forEach(card => {
+      const cellId = card.dataset.cellId;
+      const previewEl = document.getElementById(`render-${cellId}`);
+      if (previewEl) results.push([cellId, previewEl, measurePreviewSyncCurve(cellId, previewEl, readingLine, scrollY)]);
+    });
+
+    const rules = [];
+    previewSyncCurves.clear();
+    results.forEach(([cellId, previewEl, curve]) => {
+      previewEl.style.animation = '';
+      previewEl.style.transform = '';
+      if (!curve) return;
+
+      // Keep only the part of the curve the page can actually scroll through
+      const start = Math.min(Math.max(curve[0][0], 0), maxScroll);
+      const end = Math.min(Math.max(curve[curve.length - 1][0], 0), maxScroll);
+      if (end - start < 1) {
+        const px = Math.round(previewOffsetAt(curve, start));
+        if (px > 0) previewEl.style.transform = `translateY(${px}px)`;
+        return;
+      }
+      const frames = smoothedPreviewFrames(curve, start, end);
+      if (!supportsScrollTimeline) {
+        previewSyncCurves.set(cellId, frames);
+        return;
+      }
+
+      const name = `preview-sync-${generation}-${cellId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+      const span = end - start;
+      const keyframes = frames.map(([sy, off]) =>
+        `${(((sy - start) / span) * 100).toFixed(5)}% { transform: translateY(${off.toFixed(2)}px); }`);
+      rules.push(`@keyframes ${name} { ${keyframes.join(' ')} }`);
+      previewEl.style.animation = `${name} auto linear both`;
+      previewEl.style.animationTimeline = 'scroll(root block)';
+      previewEl.style.animationRange = `${start.toFixed(2)}px ${end.toFixed(2)}px`;
+    });
+    previewSyncStyle.textContent = rules.join('\n');
+    // Layout changed, so redraw any caret bar against the new line positions
+    previewCursorLines.forEach((cursor, cellId) => { if (cursor) applyPreviewCursorHighlight(cellId); });
+
+    if (!supportsScrollTimeline) applyPreviewScrollFallback();
+  }
+
+  // Fallback for browsers without scroll-driven animations: apply the curves on scroll
+  function applyPreviewScrollFallback() {
+    const scrollY = window.scrollY;
+    previewSyncCurves.forEach((curve, cellId) => {
+      const previewEl = document.getElementById(`render-${cellId}`);
+      if (!previewEl) return;
+      const px = Math.round(framesValueAt(curve, scrollY));
+      previewEl.style.transform = px > 0 ? `translateY(${px}px)` : '';
+    });
+  }
+
+  let previewSyncFrame = 0;
+  function schedulePreviewScrollSync() {
+    if (previewSyncFrame) return;
+    previewSyncFrame = requestAnimationFrame(() => {
+      previewSyncFrame = 0;
+      buildPreviewScrollSync();
+    });
+  }
+  window.addEventListener('resize', schedulePreviewScrollSync);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(schedulePreviewScrollSync);
+  // Any cell changing height moves every cell below it, so rebuild when the list resizes
+  if (elCellsList) new ResizeObserver(schedulePreviewScrollSync).observe(elCellsList);
+  if (!supportsScrollTimeline) {
+    let fallbackFrame = 0;
+    window.addEventListener('scroll', () => {
+      if (fallbackFrame) return;
+      fallbackFrame = requestAnimationFrame(() => {
+        fallbackFrame = 0;
+        applyPreviewScrollFallback();
+      });
+    }, { passive: true });
   }
 
   let currentPillFrame = 0;
@@ -1414,6 +1662,36 @@
       textarea.addEventListener(evt, updateSelectionPopup)
     );
 
+    // Mark the preview line(s) matching the wrapped editor row the caret is on
+    const updateCursorLine = () => {
+      let cursor = null;
+      if (document.activeElement === textarea) {
+        const value = textarea.value;
+        const caret = textarea.selectionStart;
+        const lineStart = value.lastIndexOf('\n', caret - 1) + 1;
+        const lineEndRaw = value.indexOf('\n', caret);
+        const lineEnd = lineEndRaw === -1 ? value.length : lineEndRaw;
+        const lineText = value.slice(lineStart, lineEnd);
+        const trimmed = lineText.trim();
+        // Comment lines render nothing, even when they sit inside a paragraph
+        if (!trimmed.startsWith('//') && !trimmed.startsWith('%%')) {
+          const [rowStart, rowEnd] = getEditorRowRange(cell.id, lineText, caret - lineStart);
+          cursor = {
+            line: value.slice(0, lineStart).split('\n').length - 1,
+            rowStart: lineStart + rowStart,
+            rowEnd: lineStart + rowEnd
+          };
+        }
+      }
+      const prev = previewCursorLines.get(cell.id);
+      if (JSON.stringify(prev || null) === JSON.stringify(cursor)) return;
+      previewCursorLines.set(cell.id, cursor);
+      applyPreviewCursorHighlight(cell.id);
+    };
+    ['select', 'mouseup', 'keyup', 'focus', 'blur', 'input'].forEach((evt) =>
+      textarea.addEventListener(evt, updateCursorLine)
+    );
+
     textarea.addEventListener('input', () => {
       const text = textarea.value;
       cell.content = text;
@@ -1698,7 +1976,7 @@
       const previewEl = document.getElementById(`render-${cell.id}`);
       if (previewEl && cell.content) {
         if (window.MarkdownMath && typeof window.MarkdownMath.render === 'function') {
-          previewEl.innerHTML = window.MarkdownMath.render(cell.content);
+          previewEl.innerHTML = window.MarkdownMath.render(cell.content, { sourceMap: true });
         } else {
           previewEl.textContent = cell.content;
         }
@@ -1985,6 +2263,21 @@
     const originTop = mirror.getBoundingClientRect().top;
     const lineHeight = parseFloat(getComputedStyle(mirror).lineHeight);
 
+    // Remember where every source line sits (full line boxes) for preview scroll sync
+    const lineBoxes = new Map();
+    lineSpans.forEach((span, i) => {
+      const rects = span.getClientRects();
+      if (!rects.length) return;
+      const first = rects[0];
+      const last = rects[rects.length - 1];
+      lineBoxes.set(lineNumbers[i], {
+        top: first.top - originTop - (lineHeight - first.height) / 2,
+        bottom: last.bottom - originTop + (lineHeight - last.height) / 2
+      });
+    });
+    cellLineBoxes.set(cellId, lineBoxes);
+    schedulePreviewScrollSync();
+
     const items = getTextBlocks(lines).map(block => {
       const firstRects = lineSpans[block.startLine].getClientRects();
       const lastRects = lineSpans[block.endLine].getClientRects();
@@ -1998,6 +2291,8 @@
 
       const item = document.createElement('div');
       item.className = `block-gutter-item${block.kind === 'comment' ? ' is-comment' : ''}`;
+      // A block that fits on one editor line needs no bracket, just its count
+      if (bottom - top < lineHeight * 1.5) item.classList.add('is-single-line');
       item.style.top = `${top}px`;
       item.style.height = `${bottom - top}px`;
       const firstLine = lineNumbers[block.startLine] + 1;
@@ -2094,13 +2389,202 @@
     }
 
     if (window.MarkdownMath && typeof window.MarkdownMath.render === 'function') {
-      previewEl.innerHTML = window.MarkdownMath.render(content);
+      previewEl.innerHTML = window.MarkdownMath.render(content, { sourceMap: true });
     } else {
       previewEl.textContent = content;
     }
 
     // Apply persistent comment highlights to the preview
     highlightCommentsInPreview(cellId, previewEl);
+    applyPreviewCursorHighlight(cellId);
+    schedulePreviewScrollSync();
+  }
+
+  // Character range [start, end) of the wrapped editor row holding the caret within its source
+  // line, measured by laying the line out in the hidden mirror (same width and font as the editor)
+  function getEditorRowRange(cellId, lineText, caretInLine) {
+    const mirror = document.getElementById(`measure-mirror-${cellId}`);
+    if (!mirror || !lineText) return [0, lineText.length];
+    const node = document.createTextNode(lineText);
+    mirror.replaceChildren(node);
+    const range = document.createRange();
+    const topAt = (i) => {
+      range.setStart(node, i);
+      range.setEnd(node, i + 1);
+      const rect = range.getClientRects()[0] || range.getBoundingClientRect();
+      return rect.top;
+    };
+    const anchor = Math.min(caretInLine, lineText.length - 1);
+    const rowTop = topAt(anchor);
+    let start = anchor;
+    while (start > 0 && Math.abs(topAt(start - 1) - rowTop) < 2) start--;
+    let end = anchor + 1;
+    while (end < lineText.length && Math.abs(topAt(end) - rowTop) < 2) end++;
+    return [start, end];
+  }
+
+  // Visible "units" of a source line: one per visible character, one per $math$ span; markdown
+  // syntax (markers, **, backticks, link targets, html tags, whitespace) is skipped. Returns the
+  // absolute text offset where each unit starts.
+  function sourceLineUnits(line, base) {
+    const units = [];
+    let i = (line.match(/^\s*(#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)?/) || [''])[0].length;
+    while (i < line.length) {
+      const ch = line[i];
+      const rest = line.slice(i);
+      let close = -1;
+      if (rest.startsWith('$$') && (close = line.indexOf('$$', i + 2)) !== -1) {
+        units.push(base + i); i = close + 2; continue;
+      }
+      if (rest.startsWith('\\(') && (close = line.indexOf('\\)', i + 2)) !== -1) {
+        units.push(base + i); i = close + 2; continue;
+      }
+      if (ch === '$' && (close = line.indexOf('$', i + 1)) > i + 1) {
+        units.push(base + i); i = close + 1; continue;
+      }
+      const tag = rest.match(/^<\/?[A-Za-z][^>]*>/);
+      if (tag) { i += tag[0].length; continue; }
+      if (rest.startsWith('](') && (close = line.indexOf(')', i)) !== -1) { i = close + 1; continue; }
+      if (ch === '\\' && i + 1 < line.length) { units.push(base + i + 1); i += 2; continue; }
+      if (/\s/.test(ch) || ch === '*' || ch === '`' || ch === '[' || ch === ']') { i++; continue; }
+      units.push(base + i);
+      i++;
+    }
+    return units;
+  }
+
+  // Matching units in the rendered element: each visible character, and each KaTeX formula as one
+  function renderedUnits(el) {
+    const units = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.classList.contains('katex')) {
+            units.push({ el: node });
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_SKIP;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = node.nodeValue;
+      for (let i = 0; i < text.length; i++) if (!/\s/.test(text[i])) units.push({ node, i });
+    }
+    return units;
+  }
+
+  function renderedUnitRect(unit) {
+    if (unit.el) return unit.el.getBoundingClientRect();
+    const range = document.createRange();
+    range.setStart(unit.node, unit.i);
+    range.setEnd(unit.node, unit.i + 1);
+    return range.getClientRects()[0] || range.getBoundingClientRect();
+  }
+
+  // Vertical span (viewport top/bottom) of the rendered line(s) matching the editor row: map the
+  // row's characters onto the rendered text proportionally (by visible units), then take the
+  // lines those characters sit on
+  function previewRowSpan(target, textarea, cursor, firstLine, lastLine) {
+    const lines = textarea.value.split('\n');
+    let offset = 0;
+    const srcUnits = [];
+    lines.forEach((text, i) => {
+      const trimmed = text.trim();
+      if (i >= firstLine && i <= lastLine && !trimmed.startsWith('//') && !trimmed.startsWith('%%')) {
+        srcUnits.push(...sourceLineUnits(text, offset));
+      }
+      offset += text.length + 1;
+    });
+    const outUnits = renderedUnits(target);
+    if (!srcUnits.length || !outUnits.length) return null;
+
+    const ua = srcUnits.filter(u => u < cursor.rowStart).length;
+    const ub = Math.max(ua + 1, srcUnits.filter(u => u < cursor.rowEnd).length);
+    const scale = outUnits.length / srcUnits.length;
+    const ra = Math.min(outUnits.length - 1, Math.floor(ua * scale));
+    const rb = Math.min(outUnits.length - 1, Math.max(ra, Math.ceil(ub * scale) - 1));
+
+    const first = renderedUnitRect(outUnits[ra]);
+    const last = renderedUnitRect(outUnits[rb]);
+    const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || first.height;
+    const pad = (h) => Math.max(0, (lineHeight - h) / 2);
+    return {
+      top: Math.min(first.top - pad(first.height), last.top),
+      bottom: Math.max(last.bottom + pad(last.height), first.bottom)
+    };
+  }
+
+  // Mark the rendered part matching the editor caret's row with an orange bar beside it:
+  // the matching line(s) for text, the whole row for tables. Nothing under the text changes.
+  function applyPreviewCursorHighlight(cellId) {
+    const previewEl = document.getElementById(`render-${cellId}`);
+    if (!previewEl) return;
+
+    // One bar per cell, reused so it can glide between positions. Re-rendering the preview
+    // detaches it, so put it back (and let the browser register its old position) first.
+    let bar = previewCursorBars.get(cellId);
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'preview-cursor-bar is-hidden';
+      previewCursorBars.set(cellId, bar);
+    }
+    if (bar.parentElement !== previewEl) {
+      previewEl.appendChild(bar);
+      void bar.offsetTop;
+    }
+    const hide = () => bar.classList.add('is-hidden');
+
+    const cursor = previewCursorLines.get(cellId);
+    if (!cursor) return hide();
+    const line = cursor.line;
+    const block = [...previewEl.querySelectorAll(':scope > .md-block')].find(b =>
+      Number(b.dataset.srcStart) <= line && line <= Number(b.dataset.srcEnd));
+    if (!block) return hide(); // blank or comment line: nothing rendered for it
+
+    let target = block;
+    let firstLine = Number(block.dataset.srcStart);
+    let lastLine = Number(block.dataset.srcEnd);
+    if (block.dataset.srcParts) {
+      const parts = block.dataset.srcParts.split(',').map(p => p.split('-').map(Number));
+      const index = parts.findIndex(([a, b]) => a <= line && line <= b);
+      const elements = block.dataset.srcKind === 'table'
+        ? block.querySelectorAll('tr')
+        : block.querySelectorAll(':scope > ul > li, :scope > ol > li');
+      if (index !== -1 && elements[index]) {
+        target = elements[index];
+        [firstLine, lastLine] = parts[index];
+      } else if (index === -1) {
+        return hide(); // e.g. the table's |---| line or a comment inside a list
+      }
+    }
+
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const box = target.getBoundingClientRect();
+    const span = (target.tagName !== 'TR' && textarea && previewRowSpan(target, textarea, cursor, firstLine, lastLine))
+      || { top: box.top, bottom: box.bottom };
+
+    // A rounded bar in the right margin (the left edge holds the block counts), spanning the
+    // matching line(s)
+    const base = previewEl.getBoundingClientRect();
+    const right = (target.closest('table') || target).getBoundingClientRect().right;
+    const place = () => {
+      bar.style.top = `${span.top - base.top + 3}px`;
+      bar.style.height = `${Math.max(6, span.bottom - span.top - 6)}px`;
+      bar.style.left = `${right - base.left + 10}px`;
+    };
+    if (bar.classList.contains('is-hidden')) {
+      // Appearing: jump to the spot without sliding, then fade in
+      bar.style.transition = 'none';
+      place();
+      void bar.offsetTop;
+      bar.style.transition = '';
+      bar.classList.remove('is-hidden');
+    } else {
+      place();
+    }
   }
 
   // --- Realtime Character & Word Counting (Excluding Commented-Out Lines) ---
