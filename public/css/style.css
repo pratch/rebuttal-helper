@@ -1729,10 +1729,107 @@ body.view-mode-render .cell-editor-column {
   position: relative;
 }
 
+.editor-body-row {
+  flex: 1;
+  display: flex;
+}
+
 .editor-textarea-wrapper {
   position: relative;
   flex: 1;
+  min-width: 0;
   display: flex;
+}
+
+/* Per-block character counts: a zero-width track on the editor's right edge. Brackets sit on
+   the divider between the editor and preview columns, and the counts float across it. */
+.editor-block-gutter {
+  position: relative;
+  flex: 0 0 0;
+  pointer-events: none;
+}
+
+body.block-counts-hidden .editor-block-gutter {
+  display: none;
+}
+
+.btn-block-counts-toggle {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 0 0.4rem;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.btn-block-counts-toggle:hover {
+  color: var(--text-primary);
+}
+
+.btn-block-counts-toggle.active {
+  color: var(--accent-primary);
+  border-color: var(--accent-primary);
+}
+
+.block-gutter-item {
+  position: absolute;
+  left: 0;
+  width: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+}
+
+/* Bracket marking the lines this count covers, drawn on top of the gutter's divider line */
+.block-gutter-item::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: -2.75px; /* puts the 1.5px vertical stroke over the column's 1px border; ticks reach left toward the text */
+  width: 4px;
+  border: 1.5px solid var(--accent-primary);
+  border-left: none;
+  border-radius: 0 3px 3px 0;
+  box-sizing: border-box;
+}
+
+.block-gutter-count {
+  position: relative;
+  transform: translateX(calc(-50% + 0.5px)); /* centered on the column divider */
+  padding: 0 3px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  line-height: 1.4;
+  pointer-events: auto;
+  cursor: default;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.block-gutter-item.is-comment::before {
+  border-color: var(--text-muted);
+  border-style: dashed;
+}
+
+.block-gutter-item.is-comment .block-gutter-count {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-style: italic;
+}
+
+/* With no preview column to the right, keep the counts inside the editor */
+body.view-mode-reviewer-code .block-gutter-count {
+  transform: translateX(calc(-100% - 3px));
 }
 
 /* Editor Syntax Backdrop Layer (z-index 1) */
@@ -1945,13 +2042,41 @@ body.view-mode-render .cell-editor-column {
   color: var(--text-primary);
 }
 
-.char-stat-selected .char-stat-label {
-  color: var(--accent-primary);
+/* Invisible copy of the editor text, used to locate the end of the selection */
+.editor-selection-mirror {
+  visibility: hidden;
+  tab-size: 2; /* match .cell-textarea so tabs wrap identically */
 }
 
-.char-stat-selected .char-count-pill {
+/* Character count popup shown under highlighted text */
+.selection-count-popup {
+  position: absolute;
+  z-index: 6;
+  padding: 0.15rem 0.45rem 0.15rem 0.2rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent-primary);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.selection-count-num {
+  display: inline-block;
+  padding: 0 0.35rem;
+  margin-right: 0.15rem;
   background: var(--accent-primary);
   color: #fff;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.selection-count-popup[hidden] {
+  display: none;
 }
 
 /* Right Column: Rendered Markdown & Math - full height, no scrollbar */

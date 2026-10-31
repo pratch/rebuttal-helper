@@ -33,8 +33,21 @@
     activeFocusedTextarea: null,
     commentsFilter: 'open',
     activeHighlightSelection: null,
-    reviewerFontSize: localStorage.getItem('rh_rev_font_size') || 'md' // sm | md | lg | xl
+    reviewerFontSize: localStorage.getItem('rh_rev_font_size') || 'md', // sm | md | lg | xl
+    showBlockCounts: localStorage.getItem('rh_show_block_counts') !== '0'
   };
+
+  // Show/hide the per-block character count column beside every editor
+  function setShowBlockCounts(show) {
+    state.showBlockCounts = show;
+    localStorage.setItem('rh_show_block_counts', show ? '1' : '0');
+    document.body.classList.toggle('block-counts-hidden', !show);
+    document.querySelectorAll('.btn-block-counts-toggle').forEach(btn => {
+      btn.classList.toggle('active', show);
+      btn.title = show ? 'Hide per-block character counts' : 'Show per-block character counts';
+    });
+  }
+  document.body.classList.toggle('block-counts-hidden', !state.showBlockCounts);
 
   // Yjs CRDT real-time multi-peer collaboration engine
   let clientYDoc = null;
@@ -165,6 +178,48 @@
       });
     return countableLines.join('\n');
   }
+
+  // Split editor text into blocks for the per-block count gutter: every non-blank
+  // text line is its own block; consecutive comment lines (//, %%, <!-- -->) merge into one.
+  function getTextBlocks(lines) {
+    const blocks = [];
+    let inHtmlComment = false;
+    lines.forEach((line, i) => {
+      const trimmed = line.trim();
+      let kind = 'text';
+      if (inHtmlComment || trimmed.startsWith('//') || trimmed.startsWith('%%') || trimmed.startsWith('<!--')) {
+        kind = 'comment';
+      } else if (!trimmed) {
+        kind = 'blank';
+      }
+
+      const open = line.lastIndexOf('<!--');
+      if (inHtmlComment) {
+        if (line.includes('-->')) inHtmlComment = false;
+      } else if (open !== -1 && line.indexOf('-->', open) === -1) {
+        inHtmlComment = true;
+      }
+
+      if (kind === 'blank') return;
+      const prev = blocks[blocks.length - 1];
+      if (kind === 'comment' && prev && prev.kind === 'comment' && prev.endLine === i - 1) {
+        prev.endLine = i;
+      } else {
+        blocks.push({ kind, startLine: i, endLine: i });
+      }
+    });
+
+    blocks.forEach(b => {
+      const text = lines.slice(b.startLine, b.endLine + 1).join('\n');
+      b.count = b.kind === 'comment' ? text.length : getCountableText(text).length;
+    });
+    return blocks;
+  }
+
+  // Re-measure block gutters whenever an editor's size changes (wrapping, view mode, window resize)
+  const blockGutterObserver = new ResizeObserver(entries => {
+    entries.forEach(entry => renderBlockGutter(entry.target.dataset.cellId));
+  });
 
   // Helper to colorize reviewer scores
   function getScoreClass(score) {
@@ -748,6 +803,8 @@
         showToast('Document must have at least one cell', 'info');
         return;
       }
+      const name = (cell.reviewerName || '').trim();
+      if (!confirm(`Delete ${name ? `the cell for "${name}"` : 'this cell'}? Its review and answer will be removed for everyone.`)) return;
       socket.emit('cell-delete', { cellId: cell.id });
     });
 
@@ -1083,9 +1140,21 @@
     cursorContainer.id = `cursor-container-${cell.id}`;
     cursorContainer.className = 'remote-cursor-container';
 
+    // Hidden mirror used to measure where the selection ends, plus the count popup
+    const selectionMirror = document.createElement('div');
+    selectionMirror.id = `measure-mirror-${cell.id}`;
+    selectionMirror.className = 'remote-cursor-container editor-selection-mirror';
+    selectionMirror.setAttribute('aria-hidden', 'true');
+
+    const selectionPopup = document.createElement('div');
+    selectionPopup.className = 'selection-count-popup';
+    selectionPopup.hidden = true;
+
     textareaWrap.appendChild(backdrop);
     textareaWrap.appendChild(cursorContainer);
+    textareaWrap.appendChild(selectionMirror);
     textareaWrap.appendChild(textarea);
+    textareaWrap.appendChild(selectionPopup);
 
     // Sticky header above editor: Real-time Character Counter
     const footer = document.createElement('div');
@@ -1096,8 +1165,29 @@
     counterDiv.className = 'char-counter-details';
     footer.appendChild(counterDiv);
 
+    const btnBlockCounts = document.createElement('button');
+    btnBlockCounts.type = 'button';
+    btnBlockCounts.className = `btn-block-counts-toggle${state.showBlockCounts ? ' active' : ''}`;
+    btnBlockCounts.textContent = '¶ Blocks';
+    btnBlockCounts.title = state.showBlockCounts ? 'Hide per-block character counts' : 'Show per-block character counts';
+    btnBlockCounts.addEventListener('click', () => setShowBlockCounts(!state.showBlockCounts));
+    footer.appendChild(btnBlockCounts);
+
+    // Per-block character counts beside the editor, aligned with the text they measure
+    const blockGutter = document.createElement('div');
+    blockGutter.id = `block-gutter-${cell.id}`;
+    blockGutter.className = 'editor-block-gutter';
+
+    const editorRow = document.createElement('div');
+    editorRow.className = 'editor-body-row';
+    editorRow.appendChild(textareaWrap);
+    editorRow.appendChild(blockGutter);
+
+    textareaWrap.dataset.cellId = cell.id;
+    blockGutterObserver.observe(textareaWrap);
+
     editorCol.appendChild(footer);
-    editorCol.appendChild(textareaWrap);
+    editorCol.appendChild(editorRow);
 
     // =========================================================
     // Column 3: Rendered Markdown & Math Preview (Right)
@@ -1147,10 +1237,35 @@
     // Event Listeners for Editor
     let debounceTimer = null;
 
-    // Refresh the info bar's "Selected" count whenever the highlighted range changes
-    const refreshSelectionCount = () => updateCellCharCount(cell.id, textarea.value);
-    ['select', 'mouseup', 'keyup', 'focus', 'blur'].forEach((evt) =>
-      textarea.addEventListener(evt, refreshSelectionCount)
+    // Popup under the highlighted text showing how many characters are selected
+    const updateSelectionPopup = () => {
+      const { selectionStart: start, selectionEnd: end } = textarea;
+      if (document.activeElement !== textarea || start === end) {
+        selectionPopup.hidden = true;
+        return;
+      }
+
+      // Measure the end of the selection by mirroring the text up to it
+      const marker = document.createElement('span');
+      marker.textContent = '\u200b';
+      selectionMirror.replaceChildren(document.createTextNode(textarea.value.substring(0, Math.max(start, end))), marker);
+
+      const count = Math.abs(end - start);
+      selectionPopup.innerHTML = `<span class="selection-count-num">${count.toLocaleString()}</span> ${count === 1 ? 'character' : 'characters'}`;
+      selectionPopup.hidden = false;
+
+      const gap = 4;
+      const maxLeft = textareaWrap.clientWidth - selectionPopup.offsetWidth - gap;
+      let top = marker.offsetTop + marker.offsetHeight + gap;
+      // Flip above the last selected line if it would run past the bottom of the editor
+      if (top + selectionPopup.offsetHeight > textareaWrap.clientHeight) {
+        top = marker.offsetTop - selectionPopup.offsetHeight - gap;
+      }
+      selectionPopup.style.left = `${Math.max(gap, Math.min(marker.offsetLeft, maxLeft))}px`;
+      selectionPopup.style.top = `${top}px`;
+    };
+    ['select', 'mouseup', 'keyup', 'focus', 'blur', 'input'].forEach((evt) =>
+      textarea.addEventListener(evt, updateSelectionPopup)
     );
 
     textarea.addEventListener('input', () => {
@@ -1554,6 +1669,55 @@
 
     backdrop.innerHTML = buildBackdropHtml(textarea.value, cellComments);
     syncBackdropScroll(textarea, backdrop);
+    renderBlockGutter(cellId);
+  }
+
+  function renderBlockGutter(cellId) {
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const gutter = document.getElementById(`block-gutter-${cellId}`);
+    const mirror = document.getElementById(`measure-mirror-${cellId}`);
+    if (!textarea || !gutter || !mirror) return;
+
+    // Lay the text out in the hidden mirror, one span per line, to find where each line wraps
+    const lines = textarea.value.split('\n');
+    const lineSpans = lines.map(line => {
+      const span = document.createElement('span');
+      span.textContent = line;
+      return span;
+    });
+    mirror.replaceChildren(...lineSpans.flatMap((span, i) => (i ? [document.createTextNode('\n'), span] : [span])));
+
+    const originTop = mirror.getBoundingClientRect().top;
+    const lineHeight = parseFloat(getComputedStyle(mirror).lineHeight);
+
+    const items = getTextBlocks(lines).map(block => {
+      const firstRects = lineSpans[block.startLine].getClientRects();
+      const lastRects = lineSpans[block.endLine].getClientRects();
+      if (!firstRects.length || !lastRects.length) return null;
+
+      // Inline rects cover the glyphs only; expand them to the full line box
+      const first = firstRects[0];
+      const last = lastRects[lastRects.length - 1];
+      const top = first.top - originTop - (lineHeight - first.height) / 2;
+      const bottom = last.bottom - originTop + (lineHeight - last.height) / 2;
+
+      const item = document.createElement('div');
+      item.className = `block-gutter-item${block.kind === 'comment' ? ' is-comment' : ''}`;
+      item.style.top = `${top}px`;
+      item.style.height = `${bottom - top}px`;
+      const lineLabel = block.startLine === block.endLine
+        ? `Line ${block.startLine + 1}`
+        : `Lines ${block.startLine + 1}–${block.endLine + 1}`;
+      item.title = `${lineLabel} · ${block.count.toLocaleString()} characters${block.kind === 'comment' ? ' (comment, not counted)' : ''}`;
+
+      const count = document.createElement('span');
+      count.className = 'block-gutter-count';
+      count.textContent = block.count; // no thousands separator, keeps the column narrow
+      item.appendChild(count);
+      return item;
+    }).filter(Boolean);
+
+    gutter.replaceChildren(...items);
   }
 
   function renderAllEditorBackdrops() {
@@ -1658,22 +1822,11 @@
     const stat = (label, value) =>
       `<span class="char-stat"><span class="char-stat-label">${label}</span><span class="char-count-pill">${value.toLocaleString()}</span></span>`;
 
-    const stats = [
+    counterEl.innerHTML = [
       stat('Characters', totalChars),
       stat('+Comments', rawTotal),
       stat('Words', words),
-    ];
-
-    // Highlighted text in this cell's editor (only while it has focus)
-    const textarea = document.getElementById(`textarea-${cellId}`);
-    if (textarea && document.activeElement === textarea) {
-      const selected = Math.abs(textarea.selectionEnd - textarea.selectionStart);
-      if (selected > 0) {
-        stats.push(`<span class="char-stat char-stat-selected"><span class="char-stat-label">Selected</span><span class="char-count-pill">${selected.toLocaleString()}</span></span>`);
-      }
-    }
-
-    counterEl.innerHTML = stats.join('');
+    ].join('');
   }
 
   function updateGlobalCharCount() {
