@@ -752,6 +752,12 @@ kbd {
   white-space: nowrap;
 }
 
+.summary-rev-pill .pill-rev-index {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  opacity: 0.6;
+}
+
 .summary-rev-pill .pill-rev-count {
   font-family: var(--font-mono);
   font-weight: 700;
@@ -1793,7 +1799,7 @@ body.view-mode-render .cell-editor-column {
   pointer-events: none;
 }
 
-body.block-counts-hidden .editor-block-gutter {
+.cell-card.block-counts-hidden .editor-block-gutter {
   display: none;
 }
 

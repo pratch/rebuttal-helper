@@ -35,21 +35,41 @@
     commentsFilter: 'open',
     activeHighlightSelection: null,
     reviewerFontSize: localStorage.getItem('rh_rev_font_size') || 'md', // sm | md | lg | xl
-    showBlockCounts: localStorage.getItem('rh_show_block_counts') !== '0',
-    hideComments: localStorage.getItem('rh_hide_comments') === '1'
+    // Per-cell view toggles for this viewer (sets of cell ids, remembered in localStorage)
+    blockCountsHiddenCells: loadCellIdSet('rh_block_counts_hidden_cells'),
+    commentsHiddenCells: loadCellIdSet('rh_comments_hidden_cells')
   };
 
-  // Show/hide the per-block character count column beside every editor
-  function setShowBlockCounts(show) {
-    state.showBlockCounts = show;
-    localStorage.setItem('rh_show_block_counts', show ? '1' : '0');
-    document.body.classList.toggle('block-counts-hidden', !show);
-    document.querySelectorAll('.btn-block-counts-toggle').forEach(btn => {
-      btn.classList.toggle('active', show);
-      btn.title = show ? 'Hide per-block character counts' : 'Show per-block character counts';
-    });
+  function loadCellIdSet(key) {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(key) || '[]'));
+    } catch {
+      return new Set();
+    }
   }
-  document.body.classList.toggle('block-counts-hidden', !state.showBlockCounts);
+
+  function saveCellIdSet(key, set) {
+    try {
+      localStorage.setItem(key, JSON.stringify([...set]));
+    } catch { /* storage unavailable: keep the in-memory setting */ }
+  }
+
+  // Show/hide the per-block character count column beside one cell's editor
+  function updateBlockCountsButton(btn, show) {
+    btn.classList.toggle('active', show);
+    btn.title = show ? 'Hide per-block character counts for this cell' : 'Show per-block character counts for this cell';
+  }
+
+  function setCellBlockCounts(cellId, show) {
+    if (show) state.blockCountsHiddenCells.delete(cellId);
+    else state.blockCountsHiddenCells.add(cellId);
+    saveCellIdSet('rh_block_counts_hidden_cells', state.blockCountsHiddenCells);
+    const card = document.getElementById(`cell-card-${cellId}`);
+    if (!card) return;
+    card.classList.toggle('block-counts-hidden', !show);
+    const btn = card.querySelector('.btn-block-counts-toggle');
+    if (btn) updateBlockCountsButton(btn, show);
+  }
 
   // Yjs CRDT real-time multi-peer collaboration engine
   let clientYDoc = null;
@@ -785,9 +805,13 @@
 
   function createCellElement(cell, index) {
     const card = document.createElement('div');
-    card.className = state.hideComments ? 'cell-card comments-concealed' : 'cell-card';
+    const commentsHidden = state.commentsHiddenCells.has(cell.id);
+    const blockCountsShown = !state.blockCountsHiddenCells.has(cell.id);
+    card.className = 'cell-card';
+    card.classList.toggle('comments-concealed', commentsHidden);
+    card.classList.toggle('block-counts-hidden', !blockCountsShown);
     card.id = `cell-card-${cell.id}`;
-    if (state.hideComments) requestAnimationFrame(() => renderCleanView(cell.id));
+    if (commentsHidden) requestAnimationFrame(() => renderCleanView(cell.id));
     card.dataset.cellId = cell.id;
 
     // Header
@@ -1275,17 +1299,19 @@
 
     const btnBlockCounts = document.createElement('button');
     btnBlockCounts.type = 'button';
-    btnBlockCounts.className = `editor-bar-btn btn-block-counts-toggle${state.showBlockCounts ? ' active' : ''}`;
+    btnBlockCounts.className = 'editor-bar-btn btn-block-counts-toggle';
     btnBlockCounts.textContent = '¶ Blocks';
-    btnBlockCounts.title = state.showBlockCounts ? 'Hide per-block character counts' : 'Show per-block character counts';
-    btnBlockCounts.addEventListener('click', () => setShowBlockCounts(!state.showBlockCounts));
+    updateBlockCountsButton(btnBlockCounts, blockCountsShown);
+    btnBlockCounts.addEventListener('click', () =>
+      setCellBlockCounts(cell.id, state.blockCountsHiddenCells.has(cell.id)));
 
-    // Hide // comments toggle (applies to every editor)
+    // Hide // comments toggle (this cell only)
     const btnHideComments = document.createElement('button');
     btnHideComments.type = 'button';
     btnHideComments.className = 'editor-bar-btn btn-hide-comments';
-    btnHideComments.addEventListener('click', () => setHideComments(!state.hideComments));
-    updateHideCommentsButton(btnHideComments);
+    btnHideComments.addEventListener('click', () =>
+      setCellHideComments(cell.id, !state.commentsHiddenCells.has(cell.id)));
+    updateHideCommentsButton(btnHideComments, commentsHidden);
 
     const barActions = document.createElement('div');
     barActions.className = 'editor-bar-actions';
@@ -1799,15 +1825,15 @@
     renderCleanView(cellId);
   }
 
-  // --- Hide // Comments: per-viewer clean view of every editor (nothing is deleted) ---
+  // --- Hide // Comments: per-viewer, per-cell clean view of the editor (nothing is deleted) ---
 
-  function updateHideCommentsButton(btn) {
-    btn.classList.toggle('active', state.hideComments);
-    btn.setAttribute('aria-pressed', String(state.hideComments));
-    btn.textContent = state.hideComments ? 'Show //' : 'Hide //';
-    btn.title = state.hideComments
-      ? 'Show // comment lines in all editors'
-      : 'Hide // comment lines in all editors (only hides them, nothing is deleted). Click into an editor to see and edit its comments.';
+  function updateHideCommentsButton(btn, hidden) {
+    btn.classList.toggle('active', hidden);
+    btn.setAttribute('aria-pressed', String(hidden));
+    btn.textContent = hidden ? 'Show //' : 'Hide //';
+    btn.title = hidden
+      ? 'Show // comment lines in this cell'
+      : 'Hide // comment lines in this cell (only hides them, nothing is deleted). Click into the editor to see and edit its comments.';
   }
 
   // Visible (non // or %%) lines of the text, with each line's offset in the full text
@@ -1825,7 +1851,7 @@
   function renderCleanView(cellId) {
     const textarea = document.getElementById(`textarea-${cellId}`);
     const cleanView = document.getElementById(`clean-view-${cellId}`);
-    if (!textarea || !cleanView || !state.hideComments) return;
+    if (!textarea || !cleanView || !state.commentsHiddenCells.has(cellId)) return;
 
     const text = textarea.value;
     const cleanLines = getCleanLines(text);
@@ -1892,7 +1918,7 @@
   }
 
   function concealCellComments(cellId) {
-    if (!state.hideComments) return;
+    if (!state.commentsHiddenCells.has(cellId)) return;
     const card = document.getElementById(`cell-card-${cellId}`);
     if (!card) return;
     renderCleanView(cellId);
@@ -1900,29 +1926,31 @@
     renderBlockGutter(cellId);
   }
 
-  function setHideComments(hide) {
-    state.hideComments = hide;
-    localStorage.setItem('rh_hide_comments', hide ? '1' : '0');
-    document.querySelectorAll('.btn-hide-comments').forEach(updateHideCommentsButton);
-    document.querySelectorAll('.cell-card').forEach(card => {
-      const cellId = card.dataset.cellId;
-      if (!hide) {
-        card.classList.remove('comments-concealed');
-        const textarea = document.getElementById(`textarea-${cellId}`);
-        if (textarea) autoResizeTextarea(textarea);
-        renderEditorBackdrop(cellId);
-      } else if (document.activeElement !== document.getElementById(`textarea-${cellId}`)) {
-        concealCellComments(cellId);
-      }
-    });
-  }
+  function setCellHideComments(cellId, hide) {
+    if (hide) state.commentsHiddenCells.add(cellId);
+    else state.commentsHiddenCells.delete(cellId);
+    saveCellIdSet('rh_comments_hidden_cells', state.commentsHiddenCells);
 
-  setHideComments(state.hideComments);
+    const card = document.getElementById(`cell-card-${cellId}`);
+    if (!card) return;
+    const btn = card.querySelector('.btn-hide-comments');
+    if (btn) updateHideCommentsButton(btn, hide);
+
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    if (!hide) {
+      card.classList.remove('comments-concealed');
+      if (textarea) autoResizeTextarea(textarea);
+      renderEditorBackdrop(cellId);
+    } else if (document.activeElement !== textarea) {
+      concealCellComments(cellId);
+    }
+  }
 
   // An editor left revealed after a toolbar click that didn't refocus it hides again on the next outside click
   document.addEventListener('mousedown', (e) => {
-    if (!state.hideComments || e.target.closest('.quick-toolbar')) return;
+    if (e.target.closest('.quick-toolbar')) return;
     document.querySelectorAll('.cell-card:not(.comments-concealed)').forEach(card => {
+      if (!state.commentsHiddenCells.has(card.dataset.cellId)) return;
       const textarea = document.getElementById(`textarea-${card.dataset.cellId}`);
       if (textarea && document.activeElement !== textarea && !card.querySelector('.editor-textarea-wrapper').contains(e.target)) {
         concealCellComments(card.dataset.cellId);
@@ -2161,7 +2189,7 @@
         pill.dataset.cellId = cell.id;
         pill.title = `Jump to ${displayName} • ${chars.toLocaleString()} chars (${sharePct}% of rebuttal)`;
         pill.innerHTML = `
-          <span class="pill-rev-name">${escapeHtml(displayName)}</span>
+          <span class="pill-rev-name"><span class="pill-rev-index">${idx + 1}.</span> ${escapeHtml(displayName)}</span>
           <span class="pill-rev-count">${chars.toLocaleString()}</span>
           <span class="pill-rev-pct">${sharePct}%</span>
         `;
