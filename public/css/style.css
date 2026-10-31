@@ -348,45 +348,29 @@ html, body {
   z-index: 10;
 }
 
-/* User Profile Pill */
-.user-pill {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.25rem 0.6rem 0.25rem 0.35rem;
-  background: var(--bg-hover);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-full);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.user-pill:hover {
-  border-color: var(--accent-primary);
-  background: var(--bg-tertiary);
-}
-
+/* Your color avatar, shown at the start of the inline name box */
 .user-pill-avatar {
+  flex-shrink: 0;
   width: 22px;
   height: 22px;
+  padding: 0;
+  border: none;
   border-radius: 50%;
   background: var(--accent-primary);
   color: white;
   display: flex;
   align-items: center;
   justify-content: center;
+  font-family: inherit;
   font-size: 0.7rem;
   font-weight: 700;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
 }
 
-.user-pill-name {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  max-width: 100px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.user-pill-avatar:hover {
+  transform: scale(1.08);
+  box-shadow: 0 0 0 2px var(--accent-light);
 }
 
 /* View Mode Toggles */
@@ -584,6 +568,7 @@ body.theme-light .theme-sun-icon { display: block; }
 }
 
 .quick-tools-left {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -616,6 +601,7 @@ body.theme-light .theme-sun-icon { display: block; }
 }
 
 .quick-tools-right {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -647,30 +633,31 @@ kbd {
   padding: 1.5rem 1.5rem 5rem 1.5rem;
 }
 
-/* Compact Per-Reviewer Character Count Summary Bar */
+/* Compact Per-Reviewer Character Count Summary (centered in the quick toolbar) */
 .reviewer-chars-summary-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  padding: 0.4rem 0.85rem;
-  margin-bottom: 1.25rem;
-  box-shadow: var(--shadow-sm);
-  min-height: 38px;
-  box-sizing: border-box;
-  flex-wrap: wrap;
+  gap: 0.6rem;
+  flex: 1;
+  min-width: 0;
+  margin: 0 0.75rem;
+}
+
+/* Free up toolbar room for the reviewer pills on narrower screens */
+@media (max-width: 1800px) {
+  .keyboard-shortcuts-pill,
+  .summary-bar-label span {
+    display: none;
+  }
 }
 
 .summary-bar-left {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  flex: 1;
   min-width: 0;
-  flex-wrap: wrap;
+  /* auto margins center the bar when it fits, and collapse so the pills scroll when it doesn't */
+  margin-left: auto;
 }
 
 .summary-bar-label {
@@ -696,7 +683,13 @@ kbd {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  flex-wrap: wrap;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.summary-reviewers-pills::-webkit-scrollbar {
+  display: none;
 }
 
 .summary-rev-pill {
@@ -761,7 +754,8 @@ kbd {
   font-size: 0.75rem;
   white-space: nowrap;
   user-select: none;
-  margin-left: auto;
+  flex-shrink: 0;
+  margin-right: auto;
 }
 
 .summary-total-pill {
@@ -1192,6 +1186,47 @@ kbd {
 }
 
 .cell-action-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Split "Copy | Clean" control: one outline so the two copy modes read as a single action */
+.cell-copy-group {
+  display: inline-flex;
+  align-items: stretch;
+  height: 24px;
+  margin: 0 0.2rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.cell-copy-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0 0.5rem;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.cell-copy-seg + .cell-copy-seg {
+  border-left: 1px solid var(--border-color);
+}
+
+.cell-copy-seg svg {
+  width: 13px;
+  height: 13px;
+}
+
+.cell-copy-seg:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
@@ -2000,6 +2035,17 @@ body.view-mode-reviewer-code .block-gutter-count {
   box-shadow: 0 1px 3px rgba(0,0,0,0.35);
   user-select: none;
   line-height: 1.2;
+  /* Hidden by default so long names don't cover text; shown on peer motion or hover */
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s ease, visibility 0s linear 0.2s;
+}
+
+.remote-cursor-caret.tag-visible .remote-cursor-tag,
+.remote-cursor-caret.tag-hover .remote-cursor-tag {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 0.12s ease, visibility 0s;
 }
 
 /* Editor Header: Realtime Character Counter (sticks below header + quick toolbar) */
@@ -2495,7 +2541,7 @@ body.view-mode-reviewer-code .block-gutter-count {
   background: var(--bg-input);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-full);
-  padding: 0.2rem 0.55rem 0.2rem 0.65rem;
+  padding: 0.2rem 0.65rem 0.2rem 0.25rem;
   transition: border-color 0.15s ease;
 }
 
@@ -2516,7 +2562,11 @@ body.view-mode-reviewer-code .block-gutter-count {
   color: var(--text-primary);
   font-size: 0.82rem;
   font-weight: 600;
-  width: 110px;
+  width: 130px;
+  /* grow with the name where supported, so it isn't cut off */
+  field-sizing: content;
+  min-width: 60px;
+  max-width: 170px;
   outline: none;
 }
 

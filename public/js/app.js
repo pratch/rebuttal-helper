@@ -28,6 +28,7 @@
     activeUsers: [],
     activeCellId: null,
     peerCursors: new Map(), // socketId -> { cellId, cursor, user }
+    peerTagTimers: new Map(), // socketId -> timeout hiding the name tag after motion stops
     viewMode: localStorage.getItem('rh_view_mode') || '3col', // 3col | split | reviewer-code | render
     theme: localStorage.getItem('rh_theme') || 'dark',
     activeFocusedTextarea: null,
@@ -266,9 +267,7 @@
   const elActiveCountText = document.getElementById('activeCountText');
   const elAvatarStack = document.getElementById('avatarStack');
   const elMyAvatar = document.getElementById('myAvatar');
-  const elMyName = document.getElementById('myName');
   const elHeaderInlineName = document.getElementById('headerInlineName');
-  const elUserPill = document.getElementById('userPill');
   const elBtnShare = document.getElementById('btnShare');
   const elCellsList = document.getElementById('cellsList');
   const elBtnAddCellBottom = document.getElementById('btnAddCellBottom');
@@ -282,6 +281,18 @@
   const elBtnExportModalClose = document.getElementById('btnExportModalClose');
   const elBtnCloseExportModal = document.getElementById('btnCloseExportModal');
   const elBtnModalCopyMarkdown = document.getElementById('btnModalCopyMarkdown');
+  // Reviewer pills in the quick toolbar scroll sideways; let a plain mouse wheel drive that
+  const elToolbarReviewerPills = document.getElementById('summaryReviewersPills');
+  if (elToolbarReviewerPills) {
+    elToolbarReviewerPills.addEventListener('wheel', (e) => {
+      if (e.deltaY === 0 || elToolbarReviewerPills.scrollWidth <= elToolbarReviewerPills.clientWidth) return;
+      e.preventDefault();
+      elToolbarReviewerPills.scrollLeft += e.deltaY;
+    }, { passive: false });
+  }
+  const elBtnCopyAllNoComments = document.getElementById('btnCopyAllNoComments');
+  const elBtnOpenExportNoComments = document.getElementById('btnOpenExportNoComments');
+  const elExportModalTitle = document.getElementById('exportModalTitle');
   const elExportModalTextarea = document.getElementById('exportModalTextarea');
   const elExportModalCharCount = document.getElementById('exportModalCharCount');
   const elBtnDownloadMarkdown = document.getElementById('btnDownloadMarkdown');
@@ -549,6 +560,8 @@
 
   socket.on('user-left', ({ socketId }) => {
     state.peerCursors.delete(socketId);
+    clearTimeout(state.peerTagTimers.get(socketId));
+    state.peerTagTimers.delete(socketId);
     renderPeerCursors();
   });
 
@@ -583,6 +596,15 @@
   // Remote cursor movement
   socket.on('cursor-moved', ({ socketId, user, cellId, cursor }) => {
     state.peerCursors.set(socketId, { user, cellId, cursor });
+
+    // Name tag shows only while the peer is moving; hide it shortly after they stop
+    clearTimeout(state.peerTagTimers.get(socketId));
+    state.peerTagTimers.set(socketId, setTimeout(() => {
+      state.peerTagTimers.delete(socketId);
+      document.querySelectorAll(`.remote-cursor-caret[data-socket-id="${CSS.escape(socketId)}"]`)
+        .forEach(c => c.classList.remove('tag-visible'));
+    }, PEER_TAG_VISIBLE_MS));
+
     renderPeerCursors();
   });
 
@@ -789,9 +811,33 @@
     // Duplicate
     const btnDup = document.createElement('button');
     btnDup.className = 'cell-action-btn';
-    btnDup.title = 'Duplicate cell';
-    btnDup.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    btnDup.title = 'Duplicate this reviewer cell';
+    // Stacked card with a plus (not the two-squares "copy" glyph) so it isn't mistaken for copying text
+    btnDup.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="14" height="14" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v12"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="7" y1="14" x2="13" y2="14"/></svg>`;
     btnDup.addEventListener('click', () => socket.emit('cell-duplicate', { cellId: cell.id }));
+
+    // Copy this reviewer's answer, with or without // and <!-- --> comments, as one split control
+    const copyGroup = document.createElement('div');
+    copyGroup.className = 'cell-copy-group';
+
+    const btnCopy = document.createElement('button');
+    btnCopy.className = 'cell-copy-seg';
+    btnCopy.title = 'Copy this answer as written (including comment lines)';
+    btnCopy.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg><span>Copy</span>`;
+    btnCopy.addEventListener('click', () => {
+      copyTextToClipboard(getCellAnswerText(cell, false), '📋 Answer copied to clipboard!');
+    });
+
+    const btnCopyClean = document.createElement('button');
+    btnCopyClean.className = 'cell-copy-seg';
+    btnCopyClean.title = 'Copy clean: this answer without comment lines (// , %% and <!-- -->)';
+    btnCopyClean.textContent = 'Copy clean';
+    btnCopyClean.addEventListener('click', () => {
+      copyTextToClipboard(getCellAnswerText(cell, true), '📋 Answer copied without comments!');
+    });
+
+    copyGroup.appendChild(btnCopy);
+    copyGroup.appendChild(btnCopyClean);
 
     // Delete
     const btnDelete = document.createElement('button');
@@ -811,6 +857,7 @@
     headerActions.appendChild(btnUp);
     headerActions.appendChild(btnDown);
     headerActions.appendChild(btnDup);
+    headerActions.appendChild(copyGroup);
     headerActions.appendChild(btnDelete);
 
     header.appendChild(headerLeft);
@@ -1155,6 +1202,9 @@
     textareaWrap.appendChild(selectionMirror);
     textareaWrap.appendChild(textarea);
     textareaWrap.appendChild(selectionPopup);
+
+    textareaWrap.addEventListener('mousemove', (e) => updatePeerTagHover(cell.id, e));
+    textareaWrap.addEventListener('mouseleave', () => updatePeerTagHover(cell.id, null));
 
     // Sticky header above editor: Real-time Character Counter
     const footer = document.createElement('div');
@@ -1971,6 +2021,23 @@
     renderPeerCursors();
   }
 
+  const PEER_TAG_VISIBLE_MS = 2000;
+  const PEER_TAG_HOVER_SLOP = 6; // px of horizontal tolerance around the thin remote caret
+
+  // The cursor overlay sits under the textarea (pointer-events: none), so hover over a
+  // remote caret is hit-tested from mouse position on the editor instead
+  function updatePeerTagHover(cellId, e) {
+    const overlay = document.getElementById(`cursor-container-${cellId}`);
+    if (!overlay) return;
+    overlay.querySelectorAll('.remote-cursor-caret').forEach(caret => {
+      const r = caret.getBoundingClientRect();
+      const hit = e &&
+        e.clientX >= r.left - PEER_TAG_HOVER_SLOP && e.clientX <= r.right + PEER_TAG_HOVER_SLOP &&
+        e.clientY >= r.top && e.clientY <= r.bottom;
+      caret.classList.toggle('tag-hover', !!hit);
+    });
+  }
+
   function renderPeerCursors() {
     // Reset all cell card peer highlights
     document.querySelectorAll('.cell-card').forEach(card => {
@@ -2019,6 +2086,8 @@
 
         const caret = document.createElement('span');
         caret.className = 'remote-cursor-caret';
+        caret.dataset.socketId = socketId;
+        if (state.peerTagTimers.has(socketId)) caret.classList.add('tag-visible');
         caret.style.backgroundColor = user.color || '#3b82f6';
 
         const tag = document.createElement('span');
@@ -2034,7 +2103,6 @@
 
   function updateMyProfileUI() {
     if (!state.me) return;
-    elMyName.textContent = state.me.name || 'You';
     elMyAvatar.textContent = (state.me.name || 'Y').charAt(0).toUpperCase();
     elMyAvatar.style.backgroundColor = state.me.color || '#3b82f6';
     if (elHeaderInlineName && document.activeElement !== elHeaderInlineName) {
@@ -2047,7 +2115,6 @@
       const val = e.target.value.trim() || 'Collaborator';
       state.me.name = val;
       localStorage.setItem('rh_user_name', val);
-      elMyName.textContent = val;
       elMyAvatar.textContent = val.charAt(0).toUpperCase();
       socket.emit('update-user-profile', { name: val, color: state.me.color });
     });
@@ -2055,7 +2122,7 @@
 
   // --- Profile Modal & Customization ---
 
-  elUserPill.addEventListener('click', () => {
+  elMyAvatar.addEventListener('click', () => {
     elInputUserName.value = state.me.name || '';
     renderColorPickerGrid();
     elProfileModal.classList.remove('hidden');
@@ -2363,11 +2430,17 @@
 
   // --- Markdown Export Formatter ---
 
-  function getExportMarkdown() {
+  // Live answer text for a cell; stripComments drops the same comments the char counter excludes
+  function getCellAnswerText(cell, stripComments) {
+    const liveTextarea = document.querySelector(`textarea[data-cell-id="${cell.id}"]`);
+    const raw = liveTextarea ? liveTextarea.value : (cell.content || '');
+    return (stripComments ? getCountableText(raw) : raw).trim();
+  }
+
+  function getExportMarkdown(stripComments = false) {
     if (!state.doc || !state.doc.cells) return '';
     return state.doc.cells.map((cell, idx) => {
-      const liveTextarea = document.querySelector(`textarea[data-cell-id="${cell.id}"]`);
-      const content = (liveTextarea ? liveTextarea.value : (cell.content || '')).trim();
+      const content = getCellAnswerText(cell, stripComments);
       const revName = (cell.reviewerName || '').trim() || (cell.title || '').trim() || `Reviewer ${idx + 1}`;
       const header = revName.startsWith('#') ? revName : `# ${revName}`;
       return `${header}\n\n${content}`;
@@ -2376,8 +2449,11 @@
 
   // --- Export Modal Controller ---
 
-  function openExportModal(text) {
-    const markdown = text !== undefined ? text : getExportMarkdown();
+  function openExportModal(text, stripComments = false) {
+    const markdown = text !== undefined ? text : getExportMarkdown(stripComments);
+    if (elExportModalTitle) {
+      elExportModalTitle.textContent = stripComments ? '📋 Export All Markdown (No Comments)' : '📋 Export All Markdown';
+    }
     if (elExportModalTextarea) {
       elExportModalTextarea.value = markdown;
       elExportModalTextarea.scrollTop = 0;
@@ -2441,6 +2517,20 @@
     const combined = getExportMarkdown();
     copyTextToClipboard(combined, '📋 Rebuttal markdown copied to clipboard!');
   });
+
+  // 1b. Copy / view combined markdown with comment lines stripped
+  if (elBtnCopyAllNoComments) {
+    elBtnCopyAllNoComments.addEventListener('click', () => {
+      if (!state.doc) return;
+      copyTextToClipboard(getExportMarkdown(true), '📋 Rebuttal copied without comments!');
+    });
+  }
+
+  if (elBtnOpenExportNoComments) {
+    elBtnOpenExportNoComments.addEventListener('click', () => {
+      openExportModal(undefined, true);
+    });
+  }
 
   // 2. Download Markdown file
   elBtnDownloadMarkdown.addEventListener('click', () => {
@@ -2510,8 +2600,14 @@ ${renderedParts}
   function handleTextSelection() {
     if (!elCommentInputBubble.classList.contains('hidden')) return;
 
+    // Text selected inside a textarea isn't a DOM range (its rect is all zeros), so read it
+    // from the textarea itself and measure its position separately
+    const field = document.activeElement;
+    const inField = field && field.tagName === 'TEXTAREA' && field.selectionStart !== field.selectionEnd;
     const selection = window.getSelection();
-    const selectedText = selection ? selection.toString().trim() : '';
+    const selectedText = inField
+      ? field.value.substring(field.selectionStart, field.selectionEnd).trim()
+      : (selection ? selection.toString().trim() : '');
 
     if (!selectedText || selectedText.length < 2) {
       elFloatingCommentPill.classList.add('hidden');
@@ -2519,7 +2615,7 @@ ${renderedParts}
     }
 
     // Check if selection is within a cell card
-    const anchorNode = selection.anchorNode;
+    const anchorNode = inField ? field : selection.anchorNode;
     const parentCell = anchorNode ? (anchorNode.nodeType === 3 ? anchorNode.parentElement : anchorNode).closest('.cell-card') : null;
     if (!parentCell) {
       elFloatingCommentPill.classList.add('hidden');
@@ -2530,8 +2626,7 @@ ${renderedParts}
     state.activeHighlightSelection = { cellId, text: selectedText };
 
     try {
-      const range = selection.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
+      const rect = inField ? getTextareaSelectionStartRect(field, cellId) : selection.getRangeAt(0).getBoundingClientRect();
       const top = Math.max(70, rect.top + window.scrollY - 38);
       const left = Math.min(window.innerWidth - 180, Math.max(10, rect.left + window.scrollX));
 
@@ -2541,6 +2636,20 @@ ${renderedParts}
     } catch (err) {
       elFloatingCommentPill.classList.add('hidden');
     }
+  }
+
+  // Viewport rect of the first selected character in a textarea. Editor textareas have a
+  // hidden mirror with identical text layout; other textareas fall back to their own box.
+  function getTextareaSelectionStartRect(textarea, cellId) {
+    const mirror = textarea.classList.contains('cell-textarea')
+      ? document.getElementById(`measure-mirror-${cellId}`)
+      : null;
+    if (!mirror) return textarea.getBoundingClientRect();
+
+    const marker = document.createElement('span');
+    marker.textContent = '\u200b';
+    mirror.replaceChildren(document.createTextNode(textarea.value.substring(0, textarea.selectionStart)), marker);
+    return marker.getBoundingClientRect();
   }
 
   elBtnTriggerAddComment.addEventListener('click', (e) => {

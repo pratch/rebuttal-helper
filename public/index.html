@@ -64,16 +64,11 @@
         </div>
       </div>
 
-      <!-- Inline Name Input (No Login Needed) -->
+      <!-- Your identity: color avatar (opens profile/color picker) + inline name input (No Login Needed) -->
       <div class="user-inline-name-wrap" title="Enter your name to comment and edit without logging in">
-        <span class="user-inline-label">Name:</span>
+        <button type="button" class="user-pill-avatar" id="myAvatar" title="Change your avatar color">U</button>
+        <label class="user-inline-label" for="headerInlineName">Name:</label>
         <input type="text" id="headerInlineName" class="user-inline-input" placeholder="Your Name (e.g. Advisor, Alice)" maxlength="25">
-      </div>
-
-      <!-- User Profile Pill (Color avatar) -->
-      <div class="user-pill" id="userPill" title="Click to change your avatar color or details">
-        <div class="user-pill-avatar" id="myAvatar">U</div>
-        <span class="user-pill-name" id="myName">You</span>
       </div>
 
       <!-- Comments Toggle Button (Right Side Panel) -->
@@ -139,6 +134,12 @@
           <button class="dropdown-item" id="btnOpenExportModal">
             <span>👁️ View / Copy Export Text</span>
           </button>
+          <button class="dropdown-item" id="btnCopyAllNoComments">
+            <span>📋 Copy Without Comments</span>
+          </button>
+          <button class="dropdown-item" id="btnOpenExportNoComments">
+            <span>👁️ View Export Without Comments</span>
+          </button>
           <button class="dropdown-item" id="btnDownloadMarkdown">
             <span>💾 Download .md File</span>
           </button>
@@ -163,11 +164,27 @@
       <button class="quick-btn" data-insert="**" data-insert-end="**" title="Bold (**text**)"><strong>B</strong></button>
       <button class="quick-btn" data-insert="*" data-insert-end="*" title="Italic (*text*)"><em>I</em></button>
       <button class="quick-btn" data-insert="$" data-insert-end="$" title="Inline Math ($formula$)">$x$</button>
-      <button class="quick-btn" data-insert="$$\n" data-insert-end="\n$$" title="Block Math equation ($$..$$)">$$\sum$$</button>
       <button class="quick-btn" data-insert="> **" data-insert-end="**: *" title="Reviewer Quote (> **Rx.y**: *...*)">❝ Quote</button>
       <button class="quick-btn" data-insert="| Metric | Ours | Baseline |\n| :--- | :--- | :--- |\n| PSNR | **28.4** | 26.0 |\n" data-insert-end="" title="Insert Table">📊 Table</button>
       <button class="quick-btn" data-insert="`" data-insert-end="`" title="Inline Code (`code`)">&lt;/&gt;</button>
       <button class="quick-btn btn-comment-line" id="btnToggleLineComment" title="Comment/Uncomment line(s) (Ctrl + /) - excluded from character count">// Comment</button>
+    </div>
+    <!-- Compact Per-Reviewer Character Count Summary -->
+    <div class="reviewer-chars-summary-bar" id="reviewerCharsSummaryBar">
+      <div class="summary-bar-left">
+        <div class="summary-bar-label">
+          <svg class="summary-bar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 20V10M12 20V4M6 20v-6"></path>
+          </svg>
+          <span>Reviewers:</span>
+        </div>
+        <div class="summary-reviewers-pills" id="summaryReviewersPills">
+          <!-- Populated dynamically by app.js -->
+        </div>
+      </div>
+      <div class="summary-bar-right" id="summaryBarRight">
+        <!-- Populated dynamically by app.js -->
+      </div>
     </div>
     <div class="quick-tools-right">
       <!-- Universal Reviewer Font Size Stepper -->
@@ -191,24 +208,6 @@
 
   <!-- Main Container: Jupyter-style Cells -->
   <main class="notebook-container" id="notebookContainer">
-    <!-- Compact Per-Reviewer Character Count Summary -->
-    <div class="reviewer-chars-summary-bar" id="reviewerCharsSummaryBar">
-      <div class="summary-bar-left">
-        <div class="summary-bar-label">
-          <svg class="summary-bar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 20V10M12 20V4M6 20v-6"></path>
-          </svg>
-          <span>Reviewers:</span>
-        </div>
-        <div class="summary-reviewers-pills" id="summaryReviewersPills">
-          <!-- Populated dynamically by app.js -->
-        </div>
-      </div>
-      <div class="summary-bar-right" id="summaryBarRight">
-        <!-- Populated dynamically by app.js -->
-      </div>
-    </div>
-
     <!-- Dedicated Quick Pastebox & Scratchpad (Top of Notebook - Compact & Hidable, Shown by Default) -->
     <section class="quick-pastebox-card" id="quickPasteboxCard">
       <div class="pastebox-header" id="pasteboxHeader" title="Click to collapse or expand Pastebox">
@@ -469,7 +468,7 @@
   <div class="modal-overlay hidden" id="exportModal">
     <div class="modal-card modal-card-lg">
       <div class="modal-header">
-        <h3 class="modal-title">📋 Export All Markdown</h3>
+        <h3 class="modal-title" id="exportModalTitle">📋 Export All Markdown</h3>
         <button class="modal-close-btn" id="btnExportModalClose">&times;</button>
       </div>
       <div class="modal-body">
