@@ -1506,7 +1506,7 @@
     cursorContainer.id = `cursor-container-${cell.id}`;
     cursorContainer.className = 'remote-cursor-container';
 
-    // Hidden mirror used to measure where the selection ends, plus the count popup
+    // Hidden mirror used to measure where the selection ends, plus the selection count badge
     const selectionMirror = document.createElement('div');
     selectionMirror.id = `measure-mirror-${cell.id}`;
     selectionMirror.className = 'remote-cursor-container editor-selection-mirror';
@@ -1631,7 +1631,8 @@
     // Event Listeners for Editor
     let debounceTimer = null;
 
-    // Popup under the highlighted text showing how many characters are selected
+    // Badge on the editor's left border (the divider with the reviewer column), level with the
+    // last selected line, showing how many characters are selected without covering any text
     const updateSelectionPopup = () => {
       const { selectionStart: start, selectionEnd: end } = textarea;
       if (document.activeElement !== textarea || start === end) {
@@ -1645,17 +1646,13 @@
       selectionMirror.replaceChildren(document.createTextNode(textarea.value.substring(0, Math.max(start, end))), marker);
 
       const count = Math.abs(end - start);
-      selectionPopup.innerHTML = `<span class="selection-count-num">${count.toLocaleString()}</span> ${count === 1 ? 'character' : 'characters'}`;
+      selectionPopup.textContent = count.toLocaleString();
+      selectionPopup.title = `${count.toLocaleString()} ${count === 1 ? 'character' : 'characters'} selected`;
       selectionPopup.hidden = false;
 
-      const gap = 4;
-      const maxLeft = textareaWrap.clientWidth - selectionPopup.offsetWidth - gap;
-      let top = marker.offsetTop + marker.offsetHeight + gap;
-      // Flip above the last selected line if it would run past the bottom of the editor
-      if (top + selectionPopup.offsetHeight > textareaWrap.clientHeight) {
-        top = marker.offsetTop - selectionPopup.offsetHeight - gap;
-      }
-      selectionPopup.style.left = `${Math.max(gap, Math.min(marker.offsetLeft, maxLeft))}px`;
+      const lineMid = marker.offsetTop + marker.offsetHeight / 2;
+      const maxTop = textareaWrap.clientHeight - selectionPopup.offsetHeight;
+      const top = Math.max(0, Math.min(lineMid - selectionPopup.offsetHeight / 2, maxTop));
       selectionPopup.style.top = `${top}px`;
     };
     ['select', 'mouseup', 'keyup', 'focus', 'blur', 'input'].forEach((evt) =>
@@ -3366,12 +3363,27 @@ ${renderedParts}
     state.activeHighlightSelection = { cellId, text: selectedText };
 
     try {
-      const rect = inField ? getTextareaSelectionStartRect(field, cellId) : selection.getRangeAt(0).getBoundingClientRect();
-      const top = Math.max(70, rect.top + window.scrollY - 38);
-      const left = Math.min(window.innerWidth - 180, Math.max(10, rect.left + window.scrollX));
+      // Sit on the right border of the column holding the selection (in the padding gap
+      // between columns) level with the selection's first line, so no text is covered
+      let rect;
+      if (inField) {
+        rect = getTextareaSelectionStartRect(field, cellId);
+      } else {
+        const range = selection.getRangeAt(0);
+        rect = range.getClientRects()[0] || range.getBoundingClientRect();
+      }
+      const anchorEl = anchorNode.nodeType === 3 ? anchorNode.parentElement : anchorNode;
+      const column = anchorEl.closest('.cell-reviewer-column, .cell-editor-column, .cell-render-column') || parentCell;
+      const colRect = column.getBoundingClientRect();
+      const pillSize = 28;
+      const lineMid = rect.top + Math.min(rect.height || 20, 28) / 2;
+      const top = Math.max(70, lineMid + window.scrollY - pillSize / 2);
+      const left = Math.min(window.innerWidth - pillSize - 4, colRect.right - pillSize / 2) + window.scrollX;
 
       elFloatingCommentPill.style.top = `${top}px`;
       elFloatingCommentPill.style.left = `${left}px`;
+      // Open the input bubble leftward when it would run off the right edge of the window
+      elFloatingCommentPill.classList.toggle('flip', left - window.scrollX + 280 > window.innerWidth - 8);
       elFloatingCommentPill.classList.remove('hidden');
     } catch (err) {
       elFloatingCommentPill.classList.add('hidden');

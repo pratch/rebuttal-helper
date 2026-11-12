@@ -2167,31 +2167,25 @@ body.view-mode-reviewer-code .block-gutter-count {
   tab-size: 2; /* match .cell-textarea so tabs wrap identically */
 }
 
-/* Character count popup shown under highlighted text */
+/* Selected-character count: a badge centered on the editor's left border (the divider with the
+   reviewer column) beside the last selected line, so it never covers the text */
 .selection-count-popup {
   position: absolute;
+  left: 0;
+  transform: translateX(calc(-50% - 0.5px));
   z-index: 6;
-  padding: 0.15rem 0.45rem 0.15rem 0.2rem;
-  background: var(--bg-secondary);
-  border: 1px solid var(--accent-primary);
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-md);
-  font-family: var(--font-sans);
-  font-size: 0.75rem;
-  white-space: nowrap;
-  pointer-events: none;
-}
-
-.selection-count-num {
-  display: inline-block;
   padding: 0 0.35rem;
-  margin-right: 0.15rem;
   background: var(--accent-primary);
   color: #fff;
   border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
   font-weight: 600;
+  line-height: 1.5;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .selection-count-popup[hidden] {
@@ -3019,12 +3013,12 @@ mark.comment-highlight-mark.active-flash {
   color: white;
   border: none;
   border-radius: var(--radius-full);
-  padding: 0.35rem 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 600;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  justify-content: center;
   cursor: pointer;
   box-shadow: var(--shadow-lg);
   transition: transform 0.15s ease, background 0.15s ease;
@@ -3039,6 +3033,14 @@ mark.comment-highlight-mark.active-flash {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
+}
+
+.floating-comment-pill.flip .comment-input-bubble {
+  left: auto;
+  right: 0;
+}
+
+.comment-input-bubble {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
