@@ -846,11 +846,16 @@
       return spanTop + offsetAt(S) - S + half - (top + bottom) / 2;
     };
 
-    // Scan the scroll range where the column is on screen, then refine around the best spot,
-    // preferring the scroll position nearest the current one on ties
-    const lo = Math.max(0, colTop - viewBottom);
-    const hi = Math.min(maxScroll, colBottom - viewTop);
-    if (hi < lo) return;
+    // Only the scroll range where the column is on screen
+    const S = bestScrollFor(missAt, Math.max(0, colTop - viewBottom), Math.min(maxScroll, colBottom - viewTop));
+    if (S !== null) window.scrollTo({ top: S, behavior: 'smooth' });
+  }
+
+  // The page scroll in [lo, hi] where missAt(S) is closest to 0: scan, then refine around the
+  // best spot, preferring the scroll position nearest the current one on ties
+  function bestScrollFor(missAt, lo, hi) {
+    if (hi < lo) return null;
+    const scrollY = window.scrollY;
     const better = (S, best) => {
       const m = Math.abs(missAt(S));
       return m < best.miss - 0.5 || (Math.abs(m - best.miss) <= 0.5 && Math.abs(S - scrollY) < Math.abs(best.S - scrollY));
@@ -866,9 +871,63 @@
       const s = Math.min(Math.max(S, lo), hi);
       if (better(s, best)) best = { S: s, miss: Math.abs(missAt(s)) };
     }
-    if (!Number.isFinite(best.miss)) return;
-    window.scrollTo({ top: best.S, behavior: 'smooth' });
+    return Number.isFinite(best.miss) ? best.S : null;
   }
+
+  // Revealing or hiding a cell's // comments changes the editor's height, and with it where both
+  // columns sit. Run that change while keeping the text the user clicked (anchorEl, at the y that
+  // anchorY() reports) where it was on screen, so a click never scrolls anything.
+  let anchoringDepth = 0;
+  function keepClickedTextInPlace(anchorEl, anchorY, change) {
+    if (anchoringDepth || !anchorEl || !anchorEl.isConnected) { change(); return; }
+    const before = anchorY();
+    anchoringDepth++;
+    try { change(); } finally { anchoringDepth--; }
+    if (before == null || !anchorEl.isConnected) return;
+
+    // Sync off: the text sits in its own scroll box (or the page), so shift that by the change
+    if (!state.scrollSync) {
+      const box = anchorEl.closest('.editor-scroll-clip, .markdown-preview');
+      let after = anchorY();
+      if (after == null) return;
+      if (box && box.scrollHeight > box.clientHeight) {
+        box.scrollTop += after - before;
+        after = anchorY();
+      }
+      if (after != null && Math.abs(after - before) >= 1) window.scrollBy(0, after - before);
+      return;
+    }
+
+    // Sync on: rebuild the offset curves now rather than next frame, then find the page scroll
+    // that puts the text back. Text in the following column also moves by its offset curve.
+    if (previewSyncFrame) { cancelAnimationFrame(previewSyncFrame); previewSyncFrame = 0; }
+    buildPreviewScrollSync();
+    const after = anchorY();
+    if (after == null) return;
+    const card = anchorEl.closest('.cell-card');
+    const follow = card && moverFrames.get(card.dataset.cellId);
+    const following = follow && follow.el.contains(anchorEl);
+    const scrollY = window.scrollY;
+    let offsetNow = 0;
+    if (following) {
+      const transform = getComputedStyle(follow.el).transform;
+      if (transform && transform !== 'none') offsetNow = new DOMMatrixReadOnly(transform).m42;
+    }
+    const missAt = (S) => after - offsetNow + (following ? framesValueAt(follow.frames, S) : 0) - (S - scrollY) - before;
+    if (Math.abs(missAt(scrollY)) < 1) return;
+    const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const S = bestScrollFor(missAt, 0, maxScroll);
+    if (S !== null && Math.abs(S - scrollY) >= 0.5) window.scrollTo({ top: S, behavior: 'instant' });
+  }
+
+  // The element under the latest click, for keeping it in place when that click hides comments
+  let lastPointerDown = null;
+  document.addEventListener('pointerdown', (e) => {
+    lastPointerDown = e.target instanceof Element ? { el: e.target, time: performance.now() } : null;
+  }, true);
+  const recentPointerTarget = () =>
+    (lastPointerDown && performance.now() - lastPointerDown.time < 1000 ? lastPointerDown.el : null);
+  const elementTop = (el) => () => (el.isConnected ? el.getBoundingClientRect().top : null);
 
   document.addEventListener('dblclick', (e) => {
     if (!(e.target instanceof Element)) return;
@@ -1940,7 +1999,14 @@
     cleanView.title = 'Comments hidden - click to edit (shows this cell\'s comments)';
     cleanView.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      revealCellComments(cell.id, getCleanViewOffsetAt(cleanView, e.clientX, e.clientY));
+      const cleanOffset = getCleanViewOffsetAt(cleanView, e.clientX, e.clientY);
+      // Keep the clicked line where it is while the comment lines around it come back
+      const line = textarea.value.slice(0, cleanOffsetToFull(textarea.value, cleanOffset)).split('\n').length - 1;
+      const lineY = () => {
+        const box = cellLineBoxes.has(cell.id) && cellLineBoxes.get(cell.id).get(line);
+        return box ? textareaWrap.getBoundingClientRect().top + box.top : null;
+      };
+      keepClickedTextInPlace(textareaWrap, lineY, () => revealCellComments(cell.id, cleanOffset));
     });
     textareaWrap.appendChild(cleanView);
 
@@ -2161,7 +2227,8 @@
     textarea.addEventListener('blur', (e) => {
       // Toolbar buttons act on this editor and refocus it, so don't flip back to the clean view
       if (e.relatedTarget && e.relatedTarget.closest('.quick-toolbar')) return;
-      concealCellComments(cell.id);
+      const clicked = recentPointerTarget();
+      keepClickedTextInPlace(clicked, clicked && elementTop(clicked), () => concealCellComments(cell.id));
     });
 
     textarea.addEventListener('focus', () => {
@@ -2620,6 +2687,7 @@
     card.classList.remove('comments-concealed');
     autoResizeTextarea(textarea);
     renderEditorBackdrop(cellId);
+    renderBlockGutter(cellId);
     const pos = cleanOffsetToFull(textarea.value, cleanOffset || 0);
     textarea.focus({ preventScroll: true });
     textarea.setSelectionRange(pos, pos);
@@ -2661,7 +2729,7 @@
       if (!state.commentsHiddenCells.has(card.dataset.cellId)) return;
       const textarea = document.getElementById(`textarea-${card.dataset.cellId}`);
       if (textarea && document.activeElement !== textarea && !card.querySelector('.editor-textarea-wrapper').contains(e.target)) {
-        concealCellComments(card.dataset.cellId);
+        keepClickedTextInPlace(e.target, elementTop(e.target), () => concealCellComments(card.dataset.cellId));
       }
     });
   });
