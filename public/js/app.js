@@ -360,6 +360,7 @@
   document.head.appendChild(previewSyncStyle);
   let previewSyncGeneration = 0;
   const previewSyncCurves = new Map(); // cellId -> { el, frames } with smoothed [[scrollY, offset], ...] (fallback path)
+  const moverFrames = new Map(); // cellId -> { el, frames }: every cell's following column and its offset curve
 
   // Offset curve for one cell as [scrollY, offset] points (offset held constant beyond the ends),
   // plus the element it moves. The primary column scrolls with the page; the other one (the
@@ -541,6 +542,7 @@
 
     const rules = [];
     previewSyncCurves.clear();
+    moverFrames.clear();
     results.forEach(([cellId, elements, result]) => {
       elements.forEach(el => {
         if (!el) return;
@@ -556,9 +558,11 @@
       if (end - start < 1) {
         const px = Math.round(previewOffsetAt(curve, start));
         if (px !== 0) mover.style.transform = `translateY(${px}px)`;
+        moverFrames.set(cellId, { el: mover, frames: [[start, px]] });
         return;
       }
       const frames = smoothedPreviewFrames(curve, start, end);
+      moverFrames.set(cellId, { el: mover, frames });
       if (!supportsScrollTimeline) {
         previewSyncCurves.set(cellId, { el: mover, frames });
         return;
@@ -670,6 +674,96 @@
     previewPick = pick ? { cellId: card.dataset.cellId, ...pick } : null;
     applyEditorPickMarker();
   }, true);
+
+  // Double-click text in the editor or the preview: scroll the page so the matching text in the
+  // other column sits in the middle of that column's visible part (the column clipped to the
+  // screen below the sticky toolbars)
+  function centerSpanInColumn(cellId, span, contentEl) {
+    const column = contentEl.closest('.cell-editor-column, .cell-render-column');
+    if (!column) return;
+    const toolbar = document.querySelector('.quick-toolbar');
+    const viewTop = toolbar ? toolbar.getBoundingClientRect().bottom : 0;
+    const viewBottom = window.innerHeight;
+    const scrollY = window.scrollY;
+    const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+
+    // The column itself is in normal flow, so it moves one-for-one with the page
+    const colRect = column.getBoundingClientRect();
+    const colTop = colRect.top + scrollY;
+    const colBottom = colRect.bottom + scrollY;
+
+    // The text moves with the page too, plus its offset curve if this column follows the other
+    const follow = moverFrames.get(cellId);
+    const following = follow && follow.el.contains(contentEl);
+    let offsetNow = 0;
+    if (following) {
+      const transform = getComputedStyle(follow.el).transform;
+      if (transform && transform !== 'none') offsetNow = new DOMMatrixReadOnly(transform).m42;
+    }
+    const spanTop = span.top + scrollY - offsetNow;
+    const spanHeight = span.bottom - span.top;
+    const offsetAt = (S) => (following ? framesValueAt(follow.frames, S) : 0);
+
+    // How far the text's middle is from the middle of the visible part of the column at scroll S
+    // (a span taller than that part keeps its top near the top instead)
+    const missAt = (S) => {
+      const top = Math.max(viewTop, colTop - S);
+      const bottom = Math.min(viewBottom, colBottom - S);
+      if (bottom - top < 40) return Infinity; // column barely on screen
+      const half = Math.min(spanHeight / 2, (bottom - top) / 2 - 12);
+      return spanTop + offsetAt(S) - S + half - (top + bottom) / 2;
+    };
+
+    // Scan the scroll range where the column is on screen, then refine around the best spot,
+    // preferring the scroll position nearest the current one on ties
+    const lo = Math.max(0, colTop - viewBottom);
+    const hi = Math.min(maxScroll, colBottom - viewTop);
+    if (hi < lo) return;
+    const better = (S, best) => {
+      const m = Math.abs(missAt(S));
+      return m < best.miss - 0.5 || (Math.abs(m - best.miss) <= 0.5 && Math.abs(S - scrollY) < Math.abs(best.S - scrollY));
+    };
+    const startS = Math.min(Math.max(scrollY, lo), hi);
+    let best = { S: startS, miss: Math.abs(missAt(startS)) };
+    const step = 4;
+    for (let S = lo; S <= hi + step; S += step) {
+      const s = Math.min(S, hi);
+      if (better(s, best)) best = { S: s, miss: Math.abs(missAt(s)) };
+    }
+    for (let S = best.S - step; S <= best.S + step; S += 0.5) {
+      const s = Math.min(Math.max(S, lo), hi);
+      if (better(s, best)) best = { S: s, miss: Math.abs(missAt(s)) };
+    }
+    if (!Number.isFinite(best.miss)) return;
+    window.scrollTo({ top: best.S, behavior: 'smooth' });
+  }
+
+  document.addEventListener('dblclick', (e) => {
+    if (!(e.target instanceof Element)) return;
+    if (e.target.closest('button, a, input, .col-resize-handle')) return;
+    const card = e.target.closest('.cell-card');
+    if (!card) return;
+    const cellId = card.dataset.cellId;
+
+    // Editor -> the rendered line(s) for the caret (the double-clicked word)
+    if (e.target.classList.contains('cell-textarea')) {
+      const cursor = previewCursorLines.get(cellId);
+      const found = cursor && previewSpanForCursor(cellId, cursor);
+      if (found) centerSpanInColumn(cellId, found.span, document.getElementById(`render-${cellId}`));
+      return;
+    }
+
+    // Preview -> the source lines of the double-clicked block / list item / table row
+    const previewEl = e.target.closest('.markdown-preview');
+    if (!previewEl) return;
+    const pick = previewPickAt(previewEl, e.target);
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const wrap = textarea && textarea.closest('.editor-textarea-wrapper');
+    const lines = pick && wrap && editorLinesSpan(cellId, pick.first, pick.last);
+    if (!lines) return;
+    const base = wrap.getBoundingClientRect().top;
+    centerSpanInColumn(cellId, { top: base + lines.top, bottom: base + lines.bottom }, wrap);
+  });
 
   let currentPillFrame = 0;
   const scheduleCurrentReviewerPill = () => {
@@ -2714,6 +2808,40 @@
 
   // Mark the rendered part matching the editor caret's row with an orange bar beside it:
   // the matching line(s) for text, the whole row for tables. Nothing under the text changes.
+  // Rendered element and viewport span { top, bottom } of the preview line(s) for an editor
+  // caret position ({ line, rowStart, rowEnd }), or null when nothing is rendered for it
+  function previewSpanForCursor(cellId, cursor) {
+    const previewEl = document.getElementById(`render-${cellId}`);
+    if (!previewEl) return null;
+    const line = cursor.line;
+    const block = [...previewEl.querySelectorAll(':scope > .md-block')].find(b =>
+      Number(b.dataset.srcStart) <= line && line <= Number(b.dataset.srcEnd));
+    if (!block) return null; // blank or comment line: nothing rendered for it
+
+    let target = block;
+    let firstLine = Number(block.dataset.srcStart);
+    let lastLine = Number(block.dataset.srcEnd);
+    if (block.dataset.srcParts) {
+      const parts = block.dataset.srcParts.split(',').map(p => p.split('-').map(Number));
+      const index = parts.findIndex(([a, b]) => a <= line && line <= b);
+      const elements = block.dataset.srcKind === 'table'
+        ? block.querySelectorAll('tr')
+        : block.querySelectorAll(':scope > ul > li, :scope > ol > li');
+      if (index !== -1 && elements[index]) {
+        target = elements[index];
+        [firstLine, lastLine] = parts[index];
+      } else if (index === -1) {
+        return null; // e.g. the table's |---| line or a comment inside a list
+      }
+    }
+
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const box = target.getBoundingClientRect();
+    const span = (target.tagName !== 'TR' && textarea && previewRowSpan(target, textarea, cursor, firstLine, lastLine))
+      || { top: box.top, bottom: box.bottom };
+    return { target, span };
+  }
+
   function applyPreviewCursorHighlight(cellId) {
     const previewEl = document.getElementById(`render-${cellId}`);
     if (!previewEl) return;
@@ -2733,33 +2861,9 @@
     const hide = () => bar.classList.add('is-hidden');
 
     const cursor = previewCursorLines.get(cellId);
-    if (!cursor) return hide();
-    const line = cursor.line;
-    const block = [...previewEl.querySelectorAll(':scope > .md-block')].find(b =>
-      Number(b.dataset.srcStart) <= line && line <= Number(b.dataset.srcEnd));
-    if (!block) return hide(); // blank or comment line: nothing rendered for it
-
-    let target = block;
-    let firstLine = Number(block.dataset.srcStart);
-    let lastLine = Number(block.dataset.srcEnd);
-    if (block.dataset.srcParts) {
-      const parts = block.dataset.srcParts.split(',').map(p => p.split('-').map(Number));
-      const index = parts.findIndex(([a, b]) => a <= line && line <= b);
-      const elements = block.dataset.srcKind === 'table'
-        ? block.querySelectorAll('tr')
-        : block.querySelectorAll(':scope > ul > li, :scope > ol > li');
-      if (index !== -1 && elements[index]) {
-        target = elements[index];
-        [firstLine, lastLine] = parts[index];
-      } else if (index === -1) {
-        return hide(); // e.g. the table's |---| line or a comment inside a list
-      }
-    }
-
-    const textarea = document.getElementById(`textarea-${cellId}`);
-    const box = target.getBoundingClientRect();
-    const span = (target.tagName !== 'TR' && textarea && previewRowSpan(target, textarea, cursor, firstLine, lastLine))
-      || { top: box.top, bottom: box.bottom };
+    const found = cursor && previewSpanForCursor(cellId, cursor);
+    if (!found) return hide();
+    const { target, span } = found;
 
     // A rounded bar in the right margin (the left edge holds the block counts), spanning the
     // matching line(s)
@@ -2806,6 +2910,22 @@
     return Number.isFinite(first) && Number.isFinite(last) ? { first, last } : null;
   }
 
+  // { top, bottom } of source lines first..last in px from the top of the editor text, spanning
+  // the lines that are laid out (comment lines are missing while hidden), or null
+  function editorLinesSpan(cellId, first, last) {
+    const lineBoxes = cellLineBoxes.get(cellId);
+    if (!lineBoxes) return null;
+    let top = Infinity;
+    let bottom = -Infinity;
+    for (let line = first; line <= last; line++) {
+      const box = lineBoxes.get(line);
+      if (!box) continue;
+      top = Math.min(top, box.top);
+      bottom = Math.max(bottom, box.bottom);
+    }
+    return Number.isFinite(top) ? { top, bottom } : null;
+  }
+
   function applyEditorPickMarker() {
     const active = document.body.classList.contains('scroll-primary-preview') ? previewPick : null;
     editorPickBars.forEach((bar, cellId) => {
@@ -2816,7 +2936,6 @@
     const { cellId, first, last } = active;
     const textarea = document.getElementById(`textarea-${cellId}`);
     const wrap = textarea && textarea.closest('.editor-textarea-wrapper');
-    const lineBoxes = cellLineBoxes.get(cellId);
     if (!wrap) return;
 
     let bar = editorPickBars.get(cellId);
@@ -2830,16 +2949,9 @@
       void bar.offsetTop;
     }
 
-    // Span the lines that are laid out (comment lines are missing while hidden)
-    let top = Infinity;
-    let bottom = -Infinity;
-    for (let line = first; line <= last; line++) {
-      const box = lineBoxes && lineBoxes.get(line);
-      if (!box) continue;
-      top = Math.min(top, box.top);
-      bottom = Math.max(bottom, box.bottom);
-    }
-    if (!Number.isFinite(top)) return bar.classList.add('is-hidden');
+    const lines = editorLinesSpan(cellId, first, last);
+    if (!lines) return bar.classList.add('is-hidden');
+    const { top, bottom } = lines;
 
     const place = () => {
       bar.style.top = `${top + 3}px`;
