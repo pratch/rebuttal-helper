@@ -209,6 +209,23 @@
     return countableLines.join('\n');
   }
 
+  // Which source lines render in the preview: false for blank lines and comment lines
+  // (//, %%, and lines inside <!-- -->), true for the rest
+  function renderedSourceLines(lines) {
+    let inHtmlComment = false;
+    return lines.map(line => {
+      const trimmed = line.trim();
+      const shown = !!trimmed && !inHtmlComment && !trimmed.startsWith('//') && !trimmed.startsWith('%%') && !trimmed.startsWith('<!--');
+      const open = line.lastIndexOf('<!--');
+      if (inHtmlComment) {
+        if (line.includes('-->')) inHtmlComment = false;
+      } else if (open !== -1 && line.indexOf('-->', open) === -1) {
+        inHtmlComment = true;
+      }
+      return shown;
+    });
+  }
+
   // Split editor text into blocks for the per-block count gutter: every non-blank
   // text line is its own block; consecutive comment lines (//, %%, <!-- -->) merge into one.
   function getTextBlocks(lines) {
@@ -393,14 +410,38 @@
       mover = previewEl;
     }
 
-    // [primary y, mover y] pairs, both measured from the top of their own content
+    // [primary y, mover y] pairs, both measured from the top of their own content. A block's
+    // source range can include comment lines (a // run with no blank line before a paragraph
+    // belongs to that paragraph), which render nothing. So spread the rendered block over its
+    // rendered source lines only, in proportion to their height: across comment lines the
+    // preview pauses, and it moves through the block line by line with the real text.
+    const sourceLines = textarea.value.split('\n');
+    const rendered = renderedSourceLines(sourceLines);
     let anchors = [];
     blocks.forEach(block => {
-      const start = lineBoxes.get(Number(block.dataset.srcStart));
-      const end = lineBoxes.get(Number(block.dataset.srcEnd));
-      if (!start || !end) return;
-      const pairs = [[start.top, block.offsetTop], [end.bottom, block.offsetTop + block.offsetHeight]];
-      pairs.forEach(([e, p]) => anchors.push(previewPrimary ? [p, e] : [e, p]));
+      const lineNos = [];
+      for (let i = Number(block.dataset.srcStart); i <= Number(block.dataset.srcEnd); i++) {
+        if (rendered[i] && lineBoxes.get(i)) lineNos.push(i);
+      }
+      if (!lineNos.length) return;
+      const boxes = lineNos.map(i => lineBoxes.get(i));
+      const top = block.offsetTop;
+      const height = block.offsetHeight;
+
+      // Where each source line starts inside the rendered block (px from its top): found by
+      // matching the text for paragraphs and headings, else shared out by editor line height
+      const starts = (!block.dataset.srcParts && renderedLineStarts(block, lineNos.map(i => sourceLines[i])))
+        || (() => {
+          const total = boxes.reduce((sum, b) => sum + (b.bottom - b.top), 0) || 1;
+          let done = 0;
+          return boxes.map(b => { const at = (height * done) / total; done += b.bottom - b.top; return at; });
+        })();
+
+      boxes.forEach((b, k) => {
+        const end = k + 1 < starts.length ? starts[k + 1] : height;
+        [[b.top, top + starts[k]], [b.bottom, top + end]]
+          .forEach(([e, p]) => anchors.push(previewPrimary ? [p, e] : [e, p]));
+      });
     });
     if (!anchors.length) return null;
     anchors.sort((x, y) => x[0] - y[0]);
@@ -2786,6 +2827,34 @@
     return range.getClientRects()[0] || range.getBoundingClientRect();
   }
 
+  // Top of each given source line's text inside a rendered block, in px from the block's top
+  // (rising order), by matching visible units like previewRowSpan; null if it can't tell
+  function renderedLineStarts(block, lineTexts) {
+    const counts = lineTexts.map(text => sourceLineUnits(text, 0).length);
+    const total = counts.reduce((a, b) => a + b, 0);
+    const outUnits = renderedUnits(block);
+    if (!total || !outUnits.length) return null;
+    const scale = outUnits.length / total;
+    const blockTop = block.getBoundingClientRect().top;
+    let done = 0;
+    let prev = 0;
+    return counts.map((count, k) => {
+      let at = prev;
+      if (k === 0) at = 0;
+      else if (count) {
+        const unit = outUnits[Math.min(outUnits.length - 1, Math.floor(done * scale))];
+        const rect = renderedUnitRect(unit);
+        // From the character's box out to its line box (half the leading above it)
+        const host = unit.el || unit.node.parentElement;
+        const lineHeight = parseFloat(getComputedStyle(host).lineHeight) || rect.height;
+        at = Math.max(prev, rect.top - blockTop - Math.max(0, (lineHeight - rect.height) / 2));
+      }
+      done += count;
+      prev = at;
+      return at;
+    });
+  }
+
   // Vertical span (viewport top/bottom) of the rendered line(s) matching the editor row: map the
   // row's characters onto the rendered text proportionally (by visible units), then take the
   // lines those characters sit on
@@ -2926,14 +2995,16 @@
   }
 
   // { top, bottom } of source lines first..last in px from the top of the editor text, spanning
-  // the lines that are laid out (comment lines are missing while hidden), or null
+  // the lines that render (a block's range can start with comment lines), or null
   function editorLinesSpan(cellId, first, last) {
     const lineBoxes = cellLineBoxes.get(cellId);
-    if (!lineBoxes) return null;
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    if (!lineBoxes || !textarea) return null;
+    const rendered = renderedSourceLines(textarea.value.split('\n'));
     let top = Infinity;
     let bottom = -Infinity;
     for (let line = first; line <= last; line++) {
-      const box = lineBoxes.get(line);
+      const box = rendered[line] && lineBoxes.get(line);
       if (!box) continue;
       top = Math.min(top, box.top);
       bottom = Math.max(bottom, box.bottom);
