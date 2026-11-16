@@ -349,7 +349,7 @@
   // --- Editor/preview scroll sync ---
   // The raw text is usually much taller than its preview (comment lines, line breaks), so slide
   // each preview down inside its column to keep the rendered block for the text at the reading
-  // line level with that text. Anchors pair each rendered block with its source line range;
+  // line (the top of the visible area, below the sticky bars) level with that text. Anchors pair each rendered block with its source line range;
   // positions in between are interpolated, so comment-only stretches just pause the preview.
   //
   // The offset is a piecewise-linear function of the page scroll position. Where supported it is
@@ -364,9 +364,10 @@
 
   // Offset curve for one cell as [scrollY, offset] points (offset held constant beyond the ends),
   // plus the element it moves. The primary column scrolls with the page; the other one (the
-  // mover) slides inside its column so its content stays level with the primary at the
-  // reading line. Editor primary: the shorter preview slides down. Preview primary: the editor
-  // sits in a clipping box as tall as the row and usually slides up (negative offsets).
+  // mover) slides so its content stays level with the primary at the reading line. The offset
+  // isn't limited to the room left in the mover's column (that broke alignment wherever the
+  // mover is locally taller, e.g. prose wrapping more in a narrow preview); whatever slides past
+  // the column's top or bottom edge is clipped at the column instead.
   function measurePreviewSyncCurve(cellId, previewEl, readingLine, scrollY, previewPrimary) {
     const textarea = document.getElementById(`textarea-${cellId}`);
     const wrap = textarea && textarea.closest('.editor-textarea-wrapper');
@@ -381,22 +382,16 @@
     const parent = previewEl.offsetParent;
     const previewTop = parent.getBoundingClientRect().top + scrollY + parent.clientTop + previewEl.offsetTop;
 
-    // How far the mover can travel without leaving its column (negative: it must move up)
-    let room, editorTop, mover;
+    // Untransformed page position of the editor text, and which column moves
+    let editorTop, mover;
     if (previewPrimary) {
       const clip = editorRow.parentElement;
-      room = clip.clientHeight - editorRow.offsetHeight;
       editorTop = clip.getBoundingClientRect().top + scrollY + clip.clientTop + editorRow.offsetTop + wrap.offsetTop;
       mover = editorRow;
     } else {
-      const lastBlock = blocks[blocks.length - 1];
-      room = previewEl.clientHeight - (lastBlock.offsetTop + lastBlock.offsetHeight);
       editorTop = wrap.getBoundingClientRect().top + scrollY;
       mover = previewEl;
     }
-    if (Math.abs(room) < 1) return null;
-    const lo = Math.min(0, room);
-    const hi = Math.max(0, room);
 
     // [primary y, mover y] pairs, both measured from the top of their own content
     let anchors = [];
@@ -414,38 +409,23 @@
     anchors = anchors.map(([x, y]) => [x, (maxY = Math.max(maxY, y))]);
 
     const primaryTop = previewPrimary ? previewTop : editorTop;
-    const moverTop = previewPrimary ? editorTop : previewTop;
 
     // With the reading line at primary y = x: offset = x + (primaryTop - moverTop) - moverY(x)
-    const shift = primaryTop - moverTop;
-    const raw = anchors.map(([x, y]) => [x, x + shift - y]);
-    // Insert points where the offset crosses its limits, then clamp
-    const points = [raw[0]];
-    for (let i = 1; i < raw.length; i++) {
-      const [x0, f0] = raw[i - 1];
-      const [x1, f1] = raw[i];
-      [lo, hi].forEach(limit => {
-        if ((f0 - limit) * (f1 - limit) < 0) {
-          const t = (limit - f0) / (f1 - f0);
-          points.push([x0 + t * (x1 - x0), limit]);
-        }
-      });
-      points.push(raw[i]);
-    }
-    points.sort((x, y) => x[0] - y[0]);
+    const shift = primaryTop - (previewPrimary ? editorTop : previewTop);
 
     // Primary y at the reading line -> page scroll position
-    const curve = points.map(([x, f]) => [x + primaryTop - readingLine, Math.min(Math.max(f, lo), hi)]);
+    const curve = anchors.map(([x, y]) => [x + primaryTop - readingLine, x + shift - y]);
+
     return { mover, curve };
   }
 
   // Smoothed motion: the raw curve changes speed abruptly (about 0.7x page speed through a
   // paragraph, a dead stop across comment lines, faster around tall tables), which looks jerky
   // under accelerated trackpad scrolling. Sample it and run a moving average twice (a triangular
-  // kernel) so the preview eases between speeds. Averaging keeps it within the column and never
-  // makes it move against the scroll.
+  // kernel) so the following column eases between speeds. Averaging never makes it move against
+  // the scroll.
   const PREVIEW_SYNC_SAMPLE = 8;   // px of scroll between samples
-  const PREVIEW_SYNC_SMOOTH = 120; // px of scroll on each side the speed changes are spread over
+  const PREVIEW_SYNC_SMOOTH = 60; // px of scroll on each side the speed changes are spread over
 
   function smoothedPreviewFrames(curve, start, end) {
     const h = PREVIEW_SYNC_SAMPLE;
@@ -453,7 +433,8 @@
     const pad = radius * 2 * h;
     const n = Math.ceil((end - start + 2 * pad) / h) + 1;
     const xs = Array.from({ length: n }, (_, i) => start - pad + i * h);
-    let ys = xs.map(x => previewOffsetAt(curve, x));
+    const raw = xs.map(x => previewOffsetAt(curve, x));
+    let ys = raw;
 
     const boxBlur = (values) => values.map((_, i) => {
       let sum = 0;
@@ -464,7 +445,10 @@
       }
       return sum / count;
     });
-    ys = boxBlur(boxBlur(ys));
+    // Averaging rounds the corners of the curve, which would let the mover run a few px ahead
+    // of exact alignment (higher on screen), hiding a line under the top bar that the primary
+    // still shows. Never let it get ahead: it may only lag.
+    ys = boxBlur(boxBlur(ys)).map((y, i) => Math.max(y, raw[i]));
 
     const at = (x) => {
       const i = Math.min(Math.max(Math.floor((x - xs[0]) / h), 0), n - 2);
@@ -522,8 +506,12 @@
   }
 
   function buildPreviewScrollSync() {
+    // Line the columns up at the top of what's visible: just below the toolbars and the columns'
+    // sticky top bars. (Aligning further down let a taller rendered block above that line, like
+    // a heading that wraps in the narrower preview, slip under the bar while its source showed.)
     const toolbar = document.querySelector('.quick-toolbar');
-    const readingLine = (toolbar ? toolbar.getBoundingClientRect().bottom : 0) + 80;
+    const topBar = document.querySelector('.cell-editor-footer');
+    const readingLine = (toolbar ? toolbar.getBoundingClientRect().bottom : 0) + (topBar ? topBar.offsetHeight : 0);
     const scrollY = window.scrollY;
     const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     const generation = ++previewSyncGeneration;
@@ -662,18 +650,33 @@
     return btn;
   }
 
-  // Clicking in a preview remembers the spot, which the editor marks while the preview leads
+  // Clicking in a preview remembers the spot, which the editor then marks; clicking into an
+  // editor clears it, so only the column you didn't click shows a mark
   document.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !(e.target instanceof Element)) return;
-    if (e.target.closest('.btn-scroll-primary')) return;
+    if (e.target.closest('.btn-scroll-primary, .mark-offscreen-indicator')) return;
     const renderCol = e.target.closest('.cell-render-column');
-    if (!renderCol) return;
+    if (!renderCol) {
+      if (previewPick && e.target.closest('.editor-scroll-clip')) {
+        previewPick = null;
+        applyEditorPickMarker();
+      }
+      return;
+    }
     const previewEl = renderCol.querySelector('.markdown-preview');
     const card = renderCol.closest('.cell-card');
     const pick = previewEl && card ? previewPickAt(previewEl, e.target) : null;
     previewPick = pick ? { cellId: card.dataset.cellId, ...pick } : null;
     applyEditorPickMarker();
   }, true);
+
+  // Keyboard focus into an editor (Tab) clears it too
+  document.addEventListener('focusin', (e) => {
+    if (previewPick && e.target.classList && e.target.classList.contains('cell-textarea')) {
+      previewPick = null;
+      applyEditorPickMarker();
+    }
+  });
 
   // Double-click text in the editor or the preview: scroll the page so the matching text in the
   // other column sits in the middle of that column's visible part (the column clipped to the
@@ -956,6 +959,8 @@
     root.setProperty('--col-w2', `${rest * split23}fr`);
     root.setProperty('--col-w3', `${rest * (1 - split23)}fr`);
     root.setProperty('--col-w23', `${rest}fr`);
+    root.setProperty('--col-s2', `${split23}fr`);
+    root.setProperty('--col-s3', `${1 - split23}fr`);
   }
   applyColLayout();
 
@@ -1872,11 +1877,19 @@
     const renderCol = document.createElement('div');
     renderCol.className = 'cell-render-column';
 
-    // Zero-height sticky bar holding the preview's scroll-lead toggle in its top-right corner
+    // Sticky top bar holding the preview's scroll-lead toggle. It mirrors the editor's counter
+    // bar and keeps the same height (that bar grows when its counts wrap), so the text in both
+    // columns starts level.
     const renderBar = document.createElement('div');
     renderBar.className = 'render-col-bar';
     renderBar.appendChild(makeScrollPrimaryButton('preview'));
     renderCol.appendChild(renderBar);
+    if (window.ResizeObserver) {
+      new ResizeObserver(() => {
+        const h = footer.offsetHeight; // 0 while the editor is hidden: keep the natural height
+        renderBar.style.height = h ? `${h}px` : '';
+      }).observe(footer);
+    }
 
     const preview = document.createElement('div');
     preview.id = `render-${cell.id}`;
@@ -2845,6 +2858,7 @@
   function applyPreviewCursorHighlight(cellId) {
     const previewEl = document.getElementById(`render-${cellId}`);
     if (!previewEl) return;
+    scheduleMarkIndicators(); // runs after the bar below is placed or hidden
 
     // One bar per cell, reused so it can glide between positions. Re-rendering the preview
     // detaches it, so put it back (and let the browser register its old position) first.
@@ -2886,10 +2900,11 @@
     }
   }
 
-  // --- Editor marker for the preview spot (preview leads scrolling) ---
-  // The mirror of the preview caret bar: when the preview is primary, clicking a block in a
-  // preview (paragraph, list item, table row) marks its source lines with an orange bar in the
-  // editor's left margin. It lives inside the editor, so it slides along with it.
+  // --- Editor marker for the preview spot ---
+  // The mirror of the preview caret bar: clicking a block in a preview (paragraph, list item,
+  // table row) marks its source lines with an orange bar in the editor's left margin, whichever
+  // column leads scrolling. It lives inside the editor, so it slides along with it. Clicking
+  // back into the editor clears it (the caret then marks the preview instead).
   let previewPick = null; // { cellId, first, last } source line range of the clicked spot
   const editorPickBars = new Map(); // cellId -> bar element
 
@@ -2927,7 +2942,8 @@
   }
 
   function applyEditorPickMarker() {
-    const active = document.body.classList.contains('scroll-primary-preview') ? previewPick : null;
+    scheduleMarkIndicators(); // runs after the bar below is placed or hidden
+    const active = previewPick;
     editorPickBars.forEach((bar, cellId) => {
       if (!active || active.cellId !== cellId) bar.classList.add('is-hidden');
     });
@@ -2968,6 +2984,113 @@
       place();
     }
   }
+
+  // --- Off-screen indicators for the orange marks ---
+  // When a mark (preview caret bar or editor pick bar) is above or below the visible part of its
+  // column, an orange circle with an up / down arrow pins to that edge of the column instead.
+  // Clicking it scrolls the mark back into view.
+  const markIndicators = new Map(); // bar element -> indicator element
+  const ARROW_UP = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+  const ARROW_DOWN = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>';
+
+  function getMarkIndicator(bar) {
+    let ind = markIndicators.get(bar);
+    if (!ind) {
+      ind = document.createElement('button');
+      ind.type = 'button';
+      ind.className = 'mark-offscreen-indicator';
+      ind.hidden = true;
+      // Don't take focus: blurring the editor clears its caret, which would hide the preview
+      // mark (and this indicator with it) before the click lands
+      ind.addEventListener('mousedown', (e) => e.preventDefault());
+      ind.addEventListener('click', () => {
+        const contentEl = bar.parentElement;
+        const card = bar.closest('.cell-card');
+        if (!contentEl || !card) return;
+        const r = bar.getBoundingClientRect();
+        centerSpanInColumn(card.dataset.cellId, { top: r.top, bottom: r.bottom }, contentEl);
+      });
+      document.body.appendChild(ind);
+      markIndicators.set(bar, ind);
+    }
+    return ind;
+  }
+
+  function updateMarkIndicators() {
+    const toolbar = document.querySelector('.quick-toolbar');
+    const viewTop = toolbar ? toolbar.getBoundingClientRect().bottom : 0;
+    const size = 20;
+    const bars = [...previewCursorBars.values(), ...editorPickBars.values()];
+
+    bars.forEach(bar => {
+      const active = bar.isConnected && !bar.classList.contains('is-hidden');
+      const column = active && bar.closest('.cell-editor-column, .cell-render-column');
+      let ind = markIndicators.get(bar);
+      if (!column || !column.offsetParent) {
+        if (ind) ind.hidden = true;
+        return;
+      }
+
+      // Visible part of the column: below the toolbars and the column's sticky top bar
+      const colRect = column.getBoundingClientRect();
+      const footer = column.querySelector(':scope > .cell-editor-footer, :scope > .render-col-bar');
+      let top = Math.max(viewTop, colRect.top);
+      if (footer) top = Math.max(top, footer.getBoundingClientRect().bottom);
+      const bottom = Math.min(window.innerHeight, colRect.bottom);
+      const r = bar.getBoundingClientRect();
+
+      let dir = null;
+      if (bottom - top >= size + 12) {
+        if (r.bottom <= top) dir = 'up';
+        else if (r.top >= bottom) dir = 'down';
+      }
+      if (!dir) {
+        if (ind) ind.hidden = true;
+        return;
+      }
+
+      ind = ind || getMarkIndicator(bar);
+      if (ind.dataset.dir !== dir) {
+        ind.dataset.dir = dir;
+        ind.innerHTML = dir === 'up' ? ARROW_UP : ARROW_DOWN;
+        ind.title = dir === 'up' ? 'Marked line is above: click to show it' : 'Marked line is below: click to show it';
+        ind.setAttribute('aria-label', ind.title);
+      }
+      ind.style.left = `${r.left + r.width / 2 - size / 2}px`;
+      ind.style.top = `${dir === 'up' ? top + 6 : bottom - size - 6}px`;
+      ind.hidden = false;
+    });
+
+    // Drop indicators whose bar is gone
+    markIndicators.forEach((ind, bar) => {
+      if (!bars.includes(bar)) {
+        ind.remove();
+        markIndicators.delete(bar);
+      }
+    });
+  }
+
+  let markIndicatorFrame = 0;
+  let markIndicatorTimer = 0;
+  function scheduleMarkIndicators() {
+    if (!markIndicatorFrame) {
+      markIndicatorFrame = requestAnimationFrame(() => {
+        markIndicatorFrame = 0;
+        updateMarkIndicators();
+      });
+    }
+    // Again once the bar's glide (0.18s) has settled
+    clearTimeout(markIndicatorTimer);
+    markIndicatorTimer = setTimeout(updateMarkIndicators, 220);
+  }
+  window.addEventListener('scroll', () => {
+    if (markIndicatorFrame) return;
+    markIndicatorFrame = requestAnimationFrame(() => {
+      markIndicatorFrame = 0;
+      updateMarkIndicators();
+    });
+  }, { passive: true });
+  window.addEventListener('resize', scheduleMarkIndicators);
 
   // --- Realtime Character & Word Counting (Excluding Commented-Out Lines) ---
 

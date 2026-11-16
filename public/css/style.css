@@ -1302,6 +1302,10 @@ body.theme-light .summary-rev-pill.is-current .pill-rev-count {
   --col-w2: 1.35fr;
   --col-w3: 1.35fr;
   --col-w23: 2.7fr;
+  /* Editor / preview split alone, for layouts with the reviewer column collapsed. These must
+     add up to 1: grid tracks whose fr values sum to less than 1 leave the rest of the row empty. */
+  --col-s2: 0.5fr;
+  --col-s3: 0.5fr;
 }
 
 .cell-body {
@@ -1313,7 +1317,7 @@ body.theme-light .summary-rev-pill.is-current .pill-rev-count {
 
 /* Individual cell reviewer collapsed state */
 .cell-card.reviewer-collapsed .cell-body {
-  grid-template-columns: 44px minmax(200px, var(--col-w2)) minmax(200px, var(--col-w3));
+  grid-template-columns: 44px minmax(200px, var(--col-s2)) minmax(200px, var(--col-s3));
 }
 
 /* Global View Mode 1: 3-Column (Reviewer | Code | Render) - default */
@@ -1321,12 +1325,12 @@ body.view-mode-3col .cell-body {
   grid-template-columns: minmax(200px, var(--col-w1)) minmax(200px, var(--col-w2)) minmax(200px, var(--col-w3));
 }
 body.view-mode-3col .cell-card.reviewer-collapsed .cell-body {
-  grid-template-columns: 44px minmax(200px, var(--col-w2)) minmax(200px, var(--col-w3));
+  grid-template-columns: 44px minmax(200px, var(--col-s2)) minmax(200px, var(--col-s3));
 }
 
 /* Global View Mode 2: Rebuttal Only (Code | Render) - collapses reviewer panel into ribbon */
 body.view-mode-split .cell-body {
-  grid-template-columns: 44px minmax(200px, var(--col-w2)) minmax(200px, var(--col-w3));
+  grid-template-columns: 44px minmax(200px, var(--col-s2)) minmax(200px, var(--col-s3));
 }
 body.view-mode-split .cell-reviewer-column .reviewer-content-wrapper {
   display: none !important;
@@ -2291,11 +2295,13 @@ body.view-mode-reviewer-code .block-gutter-count {
 
 /* Right Column: Rendered Markdown & Math - full height, no scrollbar */
 .cell-render-column {
-  /* Top padding clears the sticky scroll-lead toggle (see .render-col-bar) */
-  --render-pad-top: 1.75rem;
-  padding: var(--render-pad-top) 1.5rem 1rem;
+  /* No top padding: the top bar (.render-col-bar) sits flush and spaces the text itself */
+  padding: 0 1.5rem 1rem;
   background: var(--bg-card);
-  overflow-y: visible;
+  /* While following the editor the preview can slide past the column's top or bottom edge:
+     clip it there (clip, unlike hidden, keeps the sticky toggle and line working) */
+  overflow-x: visible;
+  overflow-y: clip;
   max-height: none !important;
   display: flex;
   flex-direction: column;
@@ -2350,23 +2356,27 @@ body.view-mode-reviewer-code .block-gutter-count {
   transition: opacity 0.2s ease;
 }
 
-/* The preview column is padded: reach out to its edges */
+/* The preview column is padded at the sides: reach out to its edges */
 .cell-render-column::before {
-  margin: calc(-1 * var(--render-pad-top)) -1.5rem calc(var(--render-pad-top) - 2px);
+  margin: 0 -1.5rem -2px;
 }
 
-/* Sticky, zero-height bar for the preview's toggle, lined up with the editor's counter bar */
+/* Sticky top bar for the preview, matching the editor's counter bar (its height is kept equal
+   to that bar's in JS) so the text in both columns starts at the same height */
 .render-col-bar {
   position: sticky;
   top: calc(var(--header-height) + var(--quick-toolbar-height));
-  z-index: 6;
+  z-index: 5; /* under the primary-column line, like the editor's counter bar */
   flex: none;
-  height: 0;
-  margin: calc(-1 * var(--render-pad-top)) -1.5rem var(--render-pad-top);
+  margin: 0 -1.5rem 1rem; /* edge to edge, then the editor text's 1rem top padding */
   display: flex;
   justify-content: flex-end;
-  align-items: flex-start;
-  padding: 0.35rem 0.75rem 0;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 
 .btn-scroll-primary {
@@ -2375,11 +2385,6 @@ body.view-mode-reviewer-code .block-gutter-count {
   justify-content: center;
   padding: 0 0.3rem;
   min-height: 1.1rem;
-}
-
-/* Over the preview text it needs a solid backing */
-.render-col-bar .btn-scroll-primary {
-  background: var(--bg-card);
 }
 
 .btn-scroll-primary svg {
@@ -2408,6 +2413,33 @@ body.scroll-primary-preview .cell-render-column::before {
 body.view-mode-render .cell-render-column::before,
 body.view-mode-reviewer-code .cell-editor-column::before {
   opacity: 0;
+}
+
+/* Stand-in for an orange mark that is scrolled out of its column's visible part: a circle pinned
+   to that edge of the column, pointing toward the mark (click to bring it into view) */
+.mark-offscreen-indicator {
+  position: fixed;
+  z-index: 40; /* under the sticky header (100) and quick toolbar (90) */
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #f97316;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+}
+
+.mark-offscreen-indicator[hidden] {
+  display: none;
+}
+
+.mark-offscreen-indicator svg {
+  display: block;
 }
 
 /* Same bar in the editor's left margin, marking the source of the clicked preview spot */
