@@ -9,13 +9,12 @@
 
   // --- Configuration & State ---
   const URL_PARAMS = new URLSearchParams(window.location.search);
-  let docId = URL_PARAMS.get('doc');
-  if (!docId) {
-    // Generate clean friendly default room ID
-    docId = 'rebuttal-' + Math.random().toString(36).substring(2, 8);
-    const newUrl = `${window.location.protocol}//${window.location.host}${window.location.pathname}?doc=${docId}`;
-    window.history.replaceState({ path: newUrl }, '', newUrl);
-  }
+  // Without ?doc= the board is resolved after startup (last opened board, else the board
+  // picker; see resolveInitialBoard). Joining waits on docIdReady until then.
+  const docId = URL_PARAMS.get('doc') || null;
+  let resolveDocIdReady;
+  const docIdReady = new Promise(resolve => { resolveDocIdReady = resolve; });
+  const LAST_DOC_KEY = 'rh_last_doc';
 
   const state = {
     docId: docId,
@@ -30,6 +29,7 @@
     peerCursors: new Map(), // socketId -> { cellId, cursor, user }
     peerTagTimers: new Map(), // socketId -> timeout hiding the name tag after motion stops
     viewMode: localStorage.getItem('rh_view_mode') || '3col', // 3col | split | reviewer-code | render
+    scrollPrimary: localStorage.getItem('rh_scroll_primary') === 'preview' ? 'preview' : 'editor', // column that leads scrolling
     theme: localStorage.getItem('rh_theme') || 'dark',
     activeFocusedTextarea: null,
     commentsFilter: 'open',
@@ -359,63 +359,83 @@
   const previewSyncStyle = document.createElement('style');
   document.head.appendChild(previewSyncStyle);
   let previewSyncGeneration = 0;
-  const previewSyncCurves = new Map(); // cellId -> smoothed [[scrollY, offset], ...] (fallback path)
+  const previewSyncCurves = new Map(); // cellId -> { el, frames } with smoothed [[scrollY, offset], ...] (fallback path)
 
-  // Offset curve for one cell as [scrollY, offset] points (offset held constant beyond the ends)
-  function measurePreviewSyncCurve(cellId, previewEl, readingLine, scrollY) {
+  // Offset curve for one cell as [scrollY, offset] points (offset held constant beyond the ends),
+  // plus the element it moves. The primary column scrolls with the page; the other one (the
+  // mover) slides inside its column so its content stays level with the primary at the
+  // reading line. Editor primary: the shorter preview slides down. Preview primary: the editor
+  // sits in a clipping box as tall as the row and usually slides up (negative offsets).
+  function measurePreviewSyncCurve(cellId, previewEl, readingLine, scrollY, previewPrimary) {
     const textarea = document.getElementById(`textarea-${cellId}`);
     const wrap = textarea && textarea.closest('.editor-textarea-wrapper');
+    const editorRow = document.getElementById(`editor-row-${cellId}`);
     const lineBoxes = cellLineBoxes.get(cellId);
-    if (!wrap || !lineBoxes || !wrap.offsetHeight || !previewEl.offsetHeight || !previewEl.offsetParent) return null;
+    if (!wrap || !editorRow || !lineBoxes || !wrap.offsetHeight || !previewEl.offsetHeight || !previewEl.offsetParent) return null;
 
     const blocks = previewEl.querySelectorAll(':scope > .md-block');
     if (!blocks.length) return null;
 
-    // How far the preview can move without leaving its column
-    const lastBlock = blocks[blocks.length - 1];
-    const room = previewEl.clientHeight - (lastBlock.offsetTop + lastBlock.offsetHeight);
-    if (room <= 0) return null;
+    // Untransformed page position of the preview content (offsetTop ignores transforms)
+    const parent = previewEl.offsetParent;
+    const previewTop = parent.getBoundingClientRect().top + scrollY + parent.clientTop + previewEl.offsetTop;
 
-    // [editor y, preview y] pairs, both measured from the top of their own content
+    // How far the mover can travel without leaving its column (negative: it must move up)
+    let room, editorTop, mover;
+    if (previewPrimary) {
+      const clip = editorRow.parentElement;
+      room = clip.clientHeight - editorRow.offsetHeight;
+      editorTop = clip.getBoundingClientRect().top + scrollY + clip.clientTop + editorRow.offsetTop + wrap.offsetTop;
+      mover = editorRow;
+    } else {
+      const lastBlock = blocks[blocks.length - 1];
+      room = previewEl.clientHeight - (lastBlock.offsetTop + lastBlock.offsetHeight);
+      editorTop = wrap.getBoundingClientRect().top + scrollY;
+      mover = previewEl;
+    }
+    if (Math.abs(room) < 1) return null;
+    const lo = Math.min(0, room);
+    const hi = Math.max(0, room);
+
+    // [primary y, mover y] pairs, both measured from the top of their own content
     let anchors = [];
     blocks.forEach(block => {
       const start = lineBoxes.get(Number(block.dataset.srcStart));
       const end = lineBoxes.get(Number(block.dataset.srcEnd));
       if (!start || !end) return;
-      anchors.push([start.top, block.offsetTop], [end.bottom, block.offsetTop + block.offsetHeight]);
+      const pairs = [[start.top, block.offsetTop], [end.bottom, block.offsetTop + block.offsetHeight]];
+      pairs.forEach(([e, p]) => anchors.push(previewPrimary ? [p, e] : [e, p]));
     });
     if (!anchors.length) return null;
     anchors.sort((x, y) => x[0] - y[0]);
-    // Never let the preview run backwards: preview positions must not decrease
-    let maxPreviewY = -Infinity;
-    anchors = anchors.map(([e, p]) => [e, (maxPreviewY = Math.max(maxPreviewY, p))]);
+    // Never let the mover run backwards: its positions must not decrease
+    let maxY = -Infinity;
+    anchors = anchors.map(([x, y]) => [x, (maxY = Math.max(maxY, y))]);
 
-    // Untransformed page positions of the editor text and the preview
-    const wrapTop = wrap.getBoundingClientRect().top + scrollY;
-    const parent = previewEl.offsetParent;
-    const previewTop = parent.getBoundingClientRect().top + scrollY + parent.clientTop + previewEl.offsetTop;
+    const primaryTop = previewPrimary ? previewTop : editorTop;
+    const moverTop = previewPrimary ? editorTop : previewTop;
 
-    // With the reading line at editor y = e: offset = e + (wrapTop - previewTop) - previewY(e)
-    const shift = wrapTop - previewTop;
-    const raw = anchors.map(([e, p]) => [e, e + shift - p]);
+    // With the reading line at primary y = x: offset = x + (primaryTop - moverTop) - moverY(x)
+    const shift = primaryTop - moverTop;
+    const raw = anchors.map(([x, y]) => [x, x + shift - y]);
     // Insert points where the offset crosses its limits, then clamp
     const points = [raw[0]];
     for (let i = 1; i < raw.length; i++) {
-      const [e0, f0] = raw[i - 1];
-      const [e1, f1] = raw[i];
-      [0, room].forEach(limit => {
+      const [x0, f0] = raw[i - 1];
+      const [x1, f1] = raw[i];
+      [lo, hi].forEach(limit => {
         if ((f0 - limit) * (f1 - limit) < 0) {
           const t = (limit - f0) / (f1 - f0);
-          points.push([e0 + t * (e1 - e0), limit]);
+          points.push([x0 + t * (x1 - x0), limit]);
         }
       });
       points.push(raw[i]);
     }
     points.sort((x, y) => x[0] - y[0]);
 
-    // Editor y at the reading line -> page scroll position
-    const curve = points.map(([e, f]) => [e + wrapTop - readingLine, Math.min(Math.max(f, 0), room)]);
-    return curve;
+    // Primary y at the reading line -> page scroll position
+    const curve = points.map(([x, f]) => [x + primaryTop - readingLine, Math.min(Math.max(f, lo), hi)]);
+    return { mover, curve };
   }
 
   // Smoothed motion: the raw curve changes speed abruptly (about 0.7x page speed through a
@@ -508,31 +528,39 @@
     const generation = ++previewSyncGeneration;
 
     // Measure everything first, then write, so layout is computed only once
+    const previewPrimary = document.body.classList.contains('scroll-primary-preview');
     const results = [];
     document.querySelectorAll('.cell-card').forEach(card => {
       const cellId = card.dataset.cellId;
       const previewEl = document.getElementById(`render-${cellId}`);
-      if (previewEl) results.push([cellId, previewEl, measurePreviewSyncCurve(cellId, previewEl, readingLine, scrollY)]);
+      const editorRow = document.getElementById(`editor-row-${cellId}`);
+      if (previewEl) {
+        results.push([cellId, [previewEl, editorRow], measurePreviewSyncCurve(cellId, previewEl, readingLine, scrollY, previewPrimary)]);
+      }
     });
 
     const rules = [];
     previewSyncCurves.clear();
-    results.forEach(([cellId, previewEl, curve]) => {
-      previewEl.style.animation = '';
-      previewEl.style.transform = '';
-      if (!curve) return;
+    results.forEach(([cellId, elements, result]) => {
+      elements.forEach(el => {
+        if (!el) return;
+        el.style.animation = '';
+        el.style.transform = '';
+      });
+      if (!result) return;
+      const { mover, curve } = result;
 
       // Keep only the part of the curve the page can actually scroll through
       const start = Math.min(Math.max(curve[0][0], 0), maxScroll);
       const end = Math.min(Math.max(curve[curve.length - 1][0], 0), maxScroll);
       if (end - start < 1) {
         const px = Math.round(previewOffsetAt(curve, start));
-        if (px > 0) previewEl.style.transform = `translateY(${px}px)`;
+        if (px !== 0) mover.style.transform = `translateY(${px}px)`;
         return;
       }
       const frames = smoothedPreviewFrames(curve, start, end);
       if (!supportsScrollTimeline) {
-        previewSyncCurves.set(cellId, frames);
+        previewSyncCurves.set(cellId, { el: mover, frames });
         return;
       }
 
@@ -541,13 +569,14 @@
       const keyframes = frames.map(([sy, off]) =>
         `${(((sy - start) / span) * 100).toFixed(5)}% { transform: translateY(${off.toFixed(2)}px); }`);
       rules.push(`@keyframes ${name} { ${keyframes.join(' ')} }`);
-      previewEl.style.animation = `${name} auto linear both`;
-      previewEl.style.animationTimeline = 'scroll(root block)';
-      previewEl.style.animationRange = `${start.toFixed(2)}px ${end.toFixed(2)}px`;
+      mover.style.animation = `${name} auto linear both`;
+      mover.style.animationTimeline = 'scroll(root block)';
+      mover.style.animationRange = `${start.toFixed(2)}px ${end.toFixed(2)}px`;
     });
     previewSyncStyle.textContent = rules.join('\n');
     // Layout changed, so redraw any caret bar against the new line positions
     previewCursorLines.forEach((cursor, cellId) => { if (cursor) applyPreviewCursorHighlight(cellId); });
+    applyEditorPickMarker();
 
     if (!supportsScrollTimeline) applyPreviewScrollFallback();
   }
@@ -555,11 +584,10 @@
   // Fallback for browsers without scroll-driven animations: apply the curves on scroll
   function applyPreviewScrollFallback() {
     const scrollY = window.scrollY;
-    previewSyncCurves.forEach((curve, cellId) => {
-      const previewEl = document.getElementById(`render-${cellId}`);
-      if (!previewEl) return;
-      const px = Math.round(framesValueAt(curve, scrollY));
-      previewEl.style.transform = px > 0 ? `translateY(${px}px)` : '';
+    previewSyncCurves.forEach(({ el, frames }) => {
+      if (!el.isConnected) return;
+      const px = Math.round(framesValueAt(frames, scrollY));
+      el.style.transform = px !== 0 ? `translateY(${px}px)` : '';
     });
   }
 
@@ -585,6 +613,63 @@
       });
     }, { passive: true });
   }
+
+  // --- Primary scroll column (editor or preview) ---
+  // The toggle button in a cell's editor or preview column makes that column primary for every
+  // cell: it moves with the page scroll and the other column follows it. That cell's content is
+  // kept still on screen across the switch, since cell heights change with it.
+  function applyScrollPrimaryClass() {
+    // With the preview hidden, the editor has to lead
+    const previewPrimary = state.scrollPrimary === 'preview' && state.viewMode !== 'reviewer-code';
+    document.body.classList.toggle('scroll-primary-preview', previewPrimary);
+  }
+
+  function setScrollPrimary(which, anchorEl) {
+    if (state.scrollPrimary === which) return;
+    const before = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
+    state.scrollPrimary = which;
+    try { localStorage.setItem('rh_scroll_primary', which); } catch (e) { /* ignore */ }
+    applyScrollPrimaryClass();
+    buildPreviewScrollSync();
+    if (anchorEl) {
+      const delta = anchorEl.getBoundingClientRect().top - before;
+      if (Math.abs(delta) >= 1) window.scrollBy(0, delta);
+    }
+  }
+
+  // Toggle in the top-right of the editor / preview column that makes it lead scrolling.
+  // Its highlighted state comes from the body class (see .btn-scroll-primary in the CSS).
+  function makeScrollPrimaryButton(which) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'editor-bar-btn btn-scroll-primary';
+    btn.dataset.col = which;
+    btn.title = which === 'editor'
+      ? 'Lead scrolling with the editor (the preview follows it)'
+      : 'Lead scrolling with the preview (the editor follows it)';
+    btn.setAttribute('aria-label', btn.title);
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M7 8l5-5 5 5M7 16l5 5 5-5"/></svg>';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const card = btn.closest('.cell-card');
+      const anchor = card && card.querySelector(which === 'editor' ? '.editor-textarea-wrapper' : '.markdown-preview');
+      setScrollPrimary(which, anchor);
+    });
+    return btn;
+  }
+
+  // Clicking in a preview remembers the spot, which the editor marks while the preview leads
+  document.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !(e.target instanceof Element)) return;
+    if (e.target.closest('.btn-scroll-primary')) return;
+    const renderCol = e.target.closest('.cell-render-column');
+    if (!renderCol) return;
+    const previewEl = renderCol.querySelector('.markdown-preview');
+    const card = renderCol.closest('.cell-card');
+    const pick = previewEl && card ? previewPickAt(previewEl, e.target) : null;
+    previewPick = pick ? { cellId: card.dataset.cellId, ...pick } : null;
+    applyEditorPickMarker();
+  }, true);
 
   let currentPillFrame = 0;
   const scheduleCurrentReviewerPill = () => {
@@ -739,6 +824,8 @@
     localStorage.setItem('rh_view_mode', mode);
     document.body.classList.remove('view-mode-3col', 'view-mode-split', 'view-mode-reviewer-code', 'view-mode-render');
     document.body.classList.add(`view-mode-${mode}`);
+    applyScrollPrimaryClass();
+    schedulePreviewScrollSync();
 
     viewModeBtns.forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === mode);
@@ -752,14 +839,109 @@
     });
   });
 
+  // --- Column Resizing ---
+  // Two numbers describe the layout, shared by every cell: col1 is the reviewer column's share
+  // of the row, split23 is the editor's share of what's left (editor + preview). The first
+  // divider moves col1 (editor and preview shrink together, keeping their ratio); the second
+  // moves split23 only, leaving the reviewer column alone.
+  const COL_LAYOUT_DEFAULT = { col1: 1 / 3.7, split23: 0.5 };
+  const COL_MIN_PX = 200;
+  const colLayout = { ...COL_LAYOUT_DEFAULT };
+  try {
+    const saved = JSON.parse(localStorage.getItem('rh_col_layout') || 'null');
+    if (saved && saved.col1 > 0 && saved.col1 < 1 && saved.split23 > 0 && saved.split23 < 1) {
+      Object.assign(colLayout, saved);
+    }
+  } catch (e) { /* keep defaults */ }
+
+  function applyColLayout() {
+    const { col1, split23 } = colLayout;
+    const rest = 1 - col1;
+    const root = document.documentElement.style;
+    root.setProperty('--col-w1', `${col1}fr`);
+    root.setProperty('--col-w2', `${rest * split23}fr`);
+    root.setProperty('--col-w3', `${rest * (1 - split23)}fr`);
+    root.setProperty('--col-w23', `${rest}fr`);
+  }
+  applyColLayout();
+
+  function saveColLayout() {
+    try { localStorage.setItem('rh_col_layout', JSON.stringify(colLayout)); } catch (e) { /* ignore */ }
+  }
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+  document.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.col-resize-handle');
+    if (!handle || e.button !== 0) return;
+    e.preventDefault();
+    const split = handle.dataset.split;
+    const body = handle.closest('.cell-body');
+    const editorCol = body.querySelector('.cell-editor-column');
+    const renderCol = body.querySelector('.cell-render-column');
+    const previewHidden = document.body.classList.contains('view-mode-reviewer-code');
+    let frame = 0;
+
+    const onMove = (ev) => {
+      if (split === '1') {
+        const rect = body.getBoundingClientRect();
+        const W = rect.width;
+        // Each remaining column (or the single editor column when the preview is hidden) keeps its minimum
+        const restMin = previewHidden
+          ? COL_MIN_PX
+          : COL_MIN_PX / Math.min(colLayout.split23, 1 - colLayout.split23);
+        colLayout.col1 = clamp((ev.clientX - rect.left) / W, COL_MIN_PX / W, Math.max(COL_MIN_PX / W, 1 - restMin / W));
+      } else {
+        const left = editorCol.getBoundingClientRect().left;
+        const span = renderCol.getBoundingClientRect().right - left;
+        colLayout.split23 = clamp((ev.clientX - left) / span, COL_MIN_PX / span, 1 - COL_MIN_PX / span);
+      }
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; applyColLayout(); });
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.body.classList.remove('col-resizing');
+      applyColLayout();
+      saveColLayout();
+      // Let position-dependent overlays (scroll sync, pills) re-measure
+      window.dispatchEvent(new Event('resize'));
+    };
+    document.body.classList.add('col-resizing');
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  });
+
+  // Double-click a divider to reset it
+  document.addEventListener('dblclick', (e) => {
+    const handle = e.target.closest('.col-resize-handle');
+    if (!handle) return;
+    if (handle.dataset.split === '1') colLayout.col1 = COL_LAYOUT_DEFAULT.col1;
+    else colLayout.split23 = COL_LAYOUT_DEFAULT.split23;
+    applyColLayout();
+    saveColLayout();
+    window.dispatchEvent(new Event('resize'));
+  });
+
+  function makeColResizeHandle(split) {
+    const handle = document.createElement('div');
+    handle.className = 'col-resize-handle';
+    handle.dataset.split = split;
+    handle.title = 'Drag to resize columns (double-click to reset)';
+    return handle;
+  }
+
   // --- Socket.IO Event Handlers ---
 
   socket.on('connect', () => {
     console.log('Connected to collaboration server with ID:', socket.id);
-    socket.emit('join-doc', {
-      docId: state.docId,
-      userName: state.me.name,
-      userColor: state.me.color
+    docIdReady.then(() => {
+      if (!state.docId) return; // still choosing a board in the picker
+      socket.emit('join-doc', {
+        docId: state.docId,
+        userName: state.me.name,
+        userColor: state.me.color
+      });
     });
   });
 
@@ -775,6 +957,7 @@
 
     state.doc = doc;
     state.me = user;
+    try { localStorage.setItem(LAST_DOC_KEY, doc.id || state.docId); } catch (e) { /* ignore */ }
     localStorage.setItem('rh_user_name', user.name);
     localStorage.setItem('rh_user_color', user.color);
 
@@ -1565,6 +1748,7 @@
     barActions.className = 'editor-bar-actions';
     barActions.appendChild(btnHideComments);
     barActions.appendChild(btnBlockCounts);
+    barActions.appendChild(makeScrollPrimaryButton('editor'));
     footer.appendChild(barActions);
 
     // Per-block character counts beside the editor, aligned with the text they measure
@@ -1573,6 +1757,7 @@
     blockGutter.className = 'editor-block-gutter';
 
     const editorRow = document.createElement('div');
+    editorRow.id = `editor-row-${cell.id}`;
     editorRow.className = 'editor-body-row';
     editorRow.appendChild(textareaWrap);
     editorRow.appendChild(blockGutter);
@@ -1581,7 +1766,11 @@
     blockGutterObserver.observe(textareaWrap);
 
     editorCol.appendChild(footer);
-    editorCol.appendChild(editorRow);
+    // Clipping box for the editor: only takes effect when the preview leads scrolling
+    const editorClip = document.createElement('div');
+    editorClip.className = 'editor-scroll-clip';
+    editorClip.appendChild(editorRow);
+    editorCol.appendChild(editorClip);
 
     // =========================================================
     // Column 3: Rendered Markdown & Math Preview (Right)
@@ -1589,10 +1778,19 @@
     const renderCol = document.createElement('div');
     renderCol.className = 'cell-render-column';
 
+    // Zero-height sticky bar holding the preview's scroll-lead toggle in its top-right corner
+    const renderBar = document.createElement('div');
+    renderBar.className = 'render-col-bar';
+    renderBar.appendChild(makeScrollPrimaryButton('preview'));
+    renderCol.appendChild(renderBar);
+
     const preview = document.createElement('div');
     preview.id = `render-${cell.id}`;
     preview.className = 'markdown-preview';
     renderCol.appendChild(preview);
+
+    reviewerCol.appendChild(makeColResizeHandle('1'));
+    editorCol.appendChild(makeColResizeHandle('2'));
 
     body.appendChild(reviewerCol);
     body.appendChild(editorCol);
@@ -2584,6 +2782,81 @@
     }
   }
 
+  // --- Editor marker for the preview spot (preview leads scrolling) ---
+  // The mirror of the preview caret bar: when the preview is primary, clicking a block in a
+  // preview (paragraph, list item, table row) marks its source lines with an orange bar in the
+  // editor's left margin. It lives inside the editor, so it slides along with it.
+  let previewPick = null; // { cellId, first, last } source line range of the clicked spot
+  const editorPickBars = new Map(); // cellId -> bar element
+
+  // Source line range of the preview element under a click, or null
+  function previewPickAt(previewEl, target) {
+    const block = target.closest('.md-block');
+    if (!block || block.parentElement !== previewEl) return null;
+    let first = Number(block.dataset.srcStart);
+    let last = Number(block.dataset.srcEnd);
+    if (block.dataset.srcParts) {
+      const parts = block.dataset.srcParts.split(',').map(p => p.split('-').map(Number));
+      const elements = [...(block.dataset.srcKind === 'table'
+        ? block.querySelectorAll('tr')
+        : block.querySelectorAll(':scope > ul > li, :scope > ol > li'))];
+      const index = elements.findIndex(el => el.contains(target));
+      if (index !== -1 && parts[index]) [first, last] = parts[index];
+    }
+    return Number.isFinite(first) && Number.isFinite(last) ? { first, last } : null;
+  }
+
+  function applyEditorPickMarker() {
+    const active = document.body.classList.contains('scroll-primary-preview') ? previewPick : null;
+    editorPickBars.forEach((bar, cellId) => {
+      if (!active || active.cellId !== cellId) bar.classList.add('is-hidden');
+    });
+    if (!active) return;
+
+    const { cellId, first, last } = active;
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const wrap = textarea && textarea.closest('.editor-textarea-wrapper');
+    const lineBoxes = cellLineBoxes.get(cellId);
+    if (!wrap) return;
+
+    let bar = editorPickBars.get(cellId);
+    if (!bar || !bar.isConnected) {
+      bar = document.createElement('div');
+      bar.className = 'preview-cursor-bar editor-pick-bar is-hidden';
+      editorPickBars.set(cellId, bar);
+    }
+    if (bar.parentElement !== wrap) {
+      wrap.appendChild(bar);
+      void bar.offsetTop;
+    }
+
+    // Span the lines that are laid out (comment lines are missing while hidden)
+    let top = Infinity;
+    let bottom = -Infinity;
+    for (let line = first; line <= last; line++) {
+      const box = lineBoxes && lineBoxes.get(line);
+      if (!box) continue;
+      top = Math.min(top, box.top);
+      bottom = Math.max(bottom, box.bottom);
+    }
+    if (!Number.isFinite(top)) return bar.classList.add('is-hidden');
+
+    const place = () => {
+      bar.style.top = `${top + 3}px`;
+      bar.style.height = `${Math.max(6, bottom - top - 6)}px`;
+    };
+    if (bar.classList.contains('is-hidden')) {
+      // Appearing: jump to the spot without sliding, then fade in
+      bar.style.transition = 'none';
+      place();
+      void bar.offsetTop;
+      bar.style.transition = '';
+      bar.classList.remove('is-hidden');
+    } else {
+      place();
+    }
+  }
+
   // --- Realtime Character & Word Counting (Excluding Commented-Out Lines) ---
 
   function updateCellCharCount(cellId, text) {
@@ -2658,35 +2931,59 @@
     const elSummaryBarRight = document.getElementById('summaryBarRight');
 
     if (elSummaryReviewersPills) {
-      elSummaryReviewersPills.replaceChildren();
+      // Update the pills in place (rebuilding them on every keystroke restarts their highlight
+      // transition, which flashes); only add, remove or reorder what changed
+      const existingPills = new Map(
+        [...elSummaryReviewersPills.querySelectorAll('.summary-rev-pill')].map(p => [p.dataset.cellId, p]));
 
-      cellStats.forEach(({ cell, idx, chars }) => {
+      const pills = cellStats.map(({ cell, idx, chars }) => {
         const displayName = cell.reviewerName?.trim() || cell.title?.trim() || `Reviewer ${idx + 1}`;
         const sharePct = totalChars > 0 ? Math.round((chars / totalChars) * 100) : 0;
 
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.className = 'summary-rev-pill';
-        pill.dataset.cellId = cell.id;
-        pill.title = `Jump to ${displayName} • ${chars.toLocaleString()} chars (${sharePct}% of rebuttal)`;
-        pill.innerHTML = `
-          <span class="pill-rev-name"><span class="pill-rev-index">${idx + 1}.</span> ${escapeHtml(displayName)}</span>
-          <span class="pill-rev-count">${chars.toLocaleString()}</span>
-          <span class="pill-rev-pct">${sharePct}%</span>
-        `;
+        let pill = existingPills.get(cell.id);
+        existingPills.delete(cell.id);
+        if (!pill) {
+          pill = document.createElement('button');
+          pill.type = 'button';
+          pill.className = 'summary-rev-pill';
+          pill.dataset.cellId = cell.id;
+          pill.innerHTML = '<span class="pill-rev-name"></span> <span class="pill-rev-count"></span> <span class="pill-rev-pct"></span>';
 
-        pill.addEventListener('click', () => {
-          const targetCard = document.getElementById(`cell-card-${cell.id}`);
-          if (targetCard) {
-            targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            targetCard.classList.remove('flash-highlight');
-            void targetCard.offsetWidth; // retrigger css animation
-            targetCard.classList.add('flash-highlight');
-            setTimeout(() => targetCard.classList.remove('flash-highlight'), 1600);
-          }
-        });
+          const cellId = cell.id;
+          pill.addEventListener('click', () => {
+            const targetCard = document.getElementById(`cell-card-${cellId}`);
+            if (targetCard) {
+              targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              targetCard.classList.remove('flash-highlight');
+              void targetCard.offsetWidth; // retrigger css animation
+              targetCard.classList.add('flash-highlight');
+              setTimeout(() => targetCard.classList.remove('flash-highlight'), 1600);
+            }
+          });
+        }
 
-        elSummaryReviewersPills.appendChild(pill);
+        const title = `Jump to ${displayName} • ${chars.toLocaleString()} chars (${sharePct}% of rebuttal)`;
+        if (pill.title !== title) pill.title = title;
+        // Compare a plain key: the browser's serialized innerHTML needn't match escapeHtml's output
+        const nameKey = `${idx + 1}|${displayName}`;
+        if (pill.dataset.nameKey !== nameKey) {
+          pill.dataset.nameKey = nameKey;
+          pill.querySelector('.pill-rev-name').innerHTML =
+            `<span class="pill-rev-index">${idx + 1}.</span> ${escapeHtml(displayName)}`;
+        }
+        const countEl = pill.querySelector('.pill-rev-count');
+        const countText = chars.toLocaleString();
+        if (countEl.textContent !== countText) countEl.textContent = countText;
+        const pctEl = pill.querySelector('.pill-rev-pct');
+        const pctText = `${sharePct}%`;
+        if (pctEl.textContent !== pctText) pctEl.textContent = pctText;
+        return pill;
+      });
+
+      existingPills.forEach(pill => pill.remove());
+      pills.forEach((pill, i) => {
+        const at = elSummaryReviewersPills.children[i];
+        if (at !== pill) elSummaryReviewersPills.insertBefore(pill, at || null);
       });
       updateCurrentReviewerPill();
     }
@@ -3861,6 +4158,9 @@ ${renderedParts}
             try {
               const res = await fetch(`/api/boards/${encodeURIComponent(board.id)}`, { method: 'DELETE' });
               if (res.ok) {
+                try {
+                  if (localStorage.getItem(LAST_DOC_KEY) === board.id) localStorage.removeItem(LAST_DOC_KEY);
+                } catch (e) { /* ignore */ }
                 showToast(`Deleted board "${board.title}"`, 'info');
                 fetchBoards();
               } else {
@@ -3881,7 +4181,7 @@ ${renderedParts}
   function openBoardsModal(tab = 'list') {
     elBoardsModal.classList.remove('hidden');
     switchBoardsTab(tab);
-    fetchBoards();
+    return fetchBoards();
   }
 
   function switchBoardsTab(tab) {
@@ -3989,6 +4289,34 @@ ${renderedParts}
       }
     });
   }
+
+  // No ?doc= in the URL: reopen the last board this browser had open (if it still exists),
+  // otherwise show the board picker, which can't be dismissed until a board is chosen
+  async function resolveInitialBoard() {
+    if (state.docId) return resolveDocIdReady();
+
+    let last = null;
+    try { last = localStorage.getItem(LAST_DOC_KEY); } catch (e) { /* ignore */ }
+    if (last) {
+      try {
+        const res = await fetch(`/api/boards/${encodeURIComponent(last)}/exists`);
+        if (res.ok && !(await res.json()).exists) last = null;
+      } catch (e) { /* offline: keep it, the join will tell */ }
+    }
+
+    if (last) {
+      state.docId = last;
+      const newUrl = `${window.location.pathname}?doc=${encodeURIComponent(last)}`;
+      window.history.replaceState({ path: newUrl }, '', newUrl);
+    } else {
+      try { localStorage.removeItem(LAST_DOC_KEY); } catch (e) { /* ignore */ }
+      elBoardsModal.classList.add('picker-mode');
+      await openBoardsModal('list');
+      if (cachedBoards.length === 0) switchBoardsTab('new');
+    }
+    resolveDocIdReady();
+  }
+  resolveInitialBoard();
 
   // Fetch boards count on initial load
   fetch('/api/boards').then(r => r.json()).then(boards => {

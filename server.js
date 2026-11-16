@@ -363,6 +363,12 @@ app.post('/api/boards', (req, res) => {
   }
 });
 
+// Whether a board exists on disk (unlike loading it, this never creates one)
+app.get('/api/boards/:id/exists', (req, res) => {
+  const cleanId = sanitizeDocId(req.params.id);
+  res.json({ exists: docCache.has(cleanId) || fs.existsSync(getDocFilePath(cleanId)) });
+});
+
 app.delete('/api/boards/:id', (req, res) => {
   try {
     const cleanId = sanitizeDocId(req.params.id);
