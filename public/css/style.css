@@ -2379,29 +2379,72 @@ body.view-mode-reviewer-code .block-gutter-count {
   line-height: 1.4;
 }
 
-.btn-scroll-primary {
+/* Scroll control centered on the editor/preview divider, in the sticky top bars:
+   [editor leads] [scroll sync] [preview leads]. It hangs off the preview bar's left edge (the
+   divider); the preview bar paints after the editor's, so the half over the editor shows too. */
+.scroll-ctl {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+}
+
+.scroll-ctl-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 0.3rem;
-  min-height: 1.1rem;
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
 }
 
-.btn-scroll-primary svg {
+.scroll-ctl-btn svg {
   display: block;
 }
 
-/* Highlight the toggle of whichever column currently leads scrolling */
-body:not(.scroll-primary-preview) .btn-scroll-primary[data-col="editor"],
-body.scroll-primary-preview .btn-scroll-primary[data-col="preview"] {
-  color: var(--accent-primary);
-  border-color: var(--accent-primary);
+.scroll-ctl-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
 }
 
-/* Only one response column showing: no choice to make */
-body.view-mode-render .btn-scroll-primary,
-body.view-mode-reviewer-code .btn-scroll-primary {
+.scroll-ctl-btn.active,
+.scroll-ctl-btn.active:hover {
+  color: #fff;
+  background: var(--accent-primary);
+}
+
+/* Picking a leading column only matters while the columns are linked */
+.scroll-ctl-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Room in the editor's counter bar for the control's left half */
+.cell-editor-footer {
+  padding-right: calc(0.75rem + 40px);
+}
+
+/* Only one response column showing: no divider, nothing to choose between */
+body.view-mode-render .scroll-ctl,
+body.view-mode-reviewer-code .scroll-ctl {
   display: none;
+}
+
+body.view-mode-reviewer-code .cell-editor-footer {
+  padding-right: 0.75rem;
 }
 
 body:not(.scroll-primary-preview) .cell-editor-column::before,
@@ -2409,10 +2452,58 @@ body.scroll-primary-preview .cell-render-column::before {
   opacity: 0.7;
 }
 
-/* Only one response column showing: nothing to choose between */
+/* Only one response column showing, or the columns not linked: no leading column to mark */
 body.view-mode-render .cell-render-column::before,
-body.view-mode-reviewer-code .cell-editor-column::before {
+body.view-mode-reviewer-code .cell-editor-column::before,
+body.scroll-sync-off .cell-editor-column::before,
+body.scroll-sync-off .cell-render-column::before {
   opacity: 0;
+}
+
+/* Scroll sync off: the editor and the preview each scroll in their own box, at most a screen
+   tall (below the sticky header and toolbar), instead of moving with the page and each other */
+body.scroll-sync-off .cell-editor-column,
+body.scroll-sync-off .cell-render-column {
+  max-height: calc(100vh - var(--header-height) - var(--quick-toolbar-height) - 1.5rem) !important;
+}
+
+body.scroll-sync-off .editor-scroll-clip {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+body.scroll-sync-off .editor-body-row {
+  flex: none;
+}
+
+/* The preview box scrolls itself; its right padding moves inside it so the caret bar, which
+   sits in that margin, stays visible */
+body.scroll-sync-off .cell-render-column {
+  padding-right: 0;
+}
+
+body.scroll-sync-off .cell-render-column::before,
+body.scroll-sync-off .render-col-bar {
+  margin-right: 0;
+}
+
+body.scroll-sync-off .markdown-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 1.5rem;
+}
+
+/* The editor box clips sideways, so pull the badges that straddle its borders inside it */
+body.scroll-sync-off .block-gutter-count {
+  transform: translateX(calc(-100% - 3px));
+}
+
+body.scroll-sync-off .selection-count-popup {
+  transform: translateX(2px);
 }
 
 /* Stand-in for an orange mark that is scrolled out of its column's visible part: a circle pinned

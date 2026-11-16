@@ -30,6 +30,7 @@
     peerTagTimers: new Map(), // socketId -> timeout hiding the name tag after motion stops
     viewMode: localStorage.getItem('rh_view_mode') || '3col', // 3col | split | reviewer-code | render
     scrollPrimary: localStorage.getItem('rh_scroll_primary') === 'preview' ? 'preview' : 'editor', // column that leads scrolling
+    scrollSync: localStorage.getItem('rh_scroll_sync') !== 'off', // editor and preview scroll linked (else each scrolls on its own)
     theme: localStorage.getItem('rh_theme') || 'dark',
     activeFocusedTextarea: null,
     commentsFilter: 'open',
@@ -557,6 +558,20 @@
     const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     const generation = ++previewSyncGeneration;
 
+    // Sync off: the editor and preview are their own scroll boxes, nothing slides
+    if (document.body.classList.contains('scroll-sync-off')) {
+      document.querySelectorAll('.markdown-preview, .editor-body-row').forEach(el => {
+        el.style.animation = '';
+        el.style.transform = '';
+      });
+      previewSyncStyle.textContent = '';
+      previewSyncCurves.clear();
+      moverFrames.clear();
+      previewCursorLines.forEach((cursor, cellId) => { if (cursor) applyPreviewCursorHighlight(cellId); });
+      applyEditorPickMarker();
+      return;
+    }
+
     // Measure everything first, then write, so layout is computed only once
     const previewPrimary = document.body.classList.contains('scroll-primary-preview');
     const results = [];
@@ -647,55 +662,115 @@
     }, { passive: true });
   }
 
-  // --- Primary scroll column (editor or preview) ---
-  // The toggle button in a cell's editor or preview column makes that column primary for every
-  // cell: it moves with the page scroll and the other column follows it. That cell's content is
-  // kept still on screen across the switch, since cell heights change with it.
+  // --- Scroll sync and primary scroll column ---
+  // Sync on: the primary column (editor or preview) moves with the page and the other follows
+  // it. Sync off: each of the two is its own scroll box, at most a screen tall. Both settings
+  // apply to every cell and are set from the control on the editor/preview divider; the cell
+  // whose control was used is kept still on screen across the change, since heights change.
   function applyScrollPrimaryClass() {
+    const sync = state.scrollSync;
     // With the preview hidden, the editor has to lead
-    const previewPrimary = state.scrollPrimary === 'preview' && state.viewMode !== 'reviewer-code';
+    const previewPrimary = sync && state.scrollPrimary === 'preview' && state.viewMode !== 'reviewer-code';
+    document.body.classList.toggle('scroll-sync-off', !sync);
     document.body.classList.toggle('scroll-primary-preview', previewPrimary);
+    updateScrollControls();
   }
 
-  function setScrollPrimary(which, anchorEl) {
-    if (state.scrollPrimary === which) return;
+  // Apply a scroll-mode change, keeping anchorEl at the same place on screen
+  function changeScrollMode(change, anchorEl) {
     const before = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
-    state.scrollPrimary = which;
-    try { localStorage.setItem('rh_scroll_primary', which); } catch (e) { /* ignore */ }
+    change();
     applyScrollPrimaryClass();
     buildPreviewScrollSync();
     if (anchorEl) {
       const delta = anchorEl.getBoundingClientRect().top - before;
       if (Math.abs(delta) >= 1) window.scrollBy(0, delta);
     }
+    scheduleMarkIndicators();
   }
 
-  // Toggle in the top-right of the editor / preview column that makes it lead scrolling.
-  // Its highlighted state comes from the body class (see .btn-scroll-primary in the CSS).
-  function makeScrollPrimaryButton(which) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'editor-bar-btn btn-scroll-primary';
-    btn.dataset.col = which;
-    btn.title = which === 'editor'
-      ? 'Lead scrolling with the editor (the preview follows it)'
-      : 'Lead scrolling with the preview (the editor follows it)';
-    btn.setAttribute('aria-label', btn.title);
-    btn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M7 8l5-5 5 5M7 16l5 5 5-5"/></svg>';
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const card = btn.closest('.cell-card');
-      const anchor = card && card.querySelector(which === 'editor' ? '.editor-textarea-wrapper' : '.markdown-preview');
-      setScrollPrimary(which, anchor);
+  function setScrollPrimary(which, anchorEl) {
+    if (state.scrollPrimary === which) return;
+    changeScrollMode(() => {
+      state.scrollPrimary = which;
+      try { localStorage.setItem('rh_scroll_primary', which); } catch (e) { /* ignore */ }
+    }, anchorEl);
+  }
+
+  function setScrollSync(on, anchorEl) {
+    if (state.scrollSync === on) return;
+    changeScrollMode(() => {
+      state.scrollSync = on;
+      try { localStorage.setItem('rh_scroll_sync', on ? 'on' : 'off'); } catch (e) { /* ignore */ }
+    }, anchorEl);
+  }
+
+  // Reflect the current mode on every divider control
+  function updateScrollControls() {
+    document.querySelectorAll('.scroll-ctl').forEach(updateScrollControl);
+  }
+
+  function updateScrollControl(ctl) {
+    const sync = ctl.querySelector('.scroll-ctl-sync');
+    sync.classList.toggle('active', state.scrollSync);
+    sync.setAttribute('aria-pressed', String(state.scrollSync));
+    sync.title = state.scrollSync
+      ? 'Scroll sync on: the other column follows the primary one. Click to scroll them separately.'
+      : 'Scroll sync off: the editor and preview scroll separately. Click to link them.';
+    ctl.querySelectorAll('.scroll-ctl-primary').forEach(btn => {
+      const on = state.scrollSync && state.scrollPrimary === btn.dataset.col;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-pressed', String(on));
+      btn.disabled = !state.scrollSync;
     });
-    return btn;
+  }
+
+  const SCROLL_CTL_ICONS = {
+    editor: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
+    preview: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>',
+    sync: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>'
+  };
+
+  // Control centered on the editor/preview divider: [editor primary] [sync] [preview primary]
+  function makeScrollControls() {
+    const ctl = document.createElement('div');
+    ctl.className = 'scroll-ctl';
+
+    const makeBtn = (cls, html, onClick) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = cls;
+      btn.innerHTML = html;
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onClick();
+      });
+      return btn;
+    };
+    const primaryBtn = (which) => {
+      const btn = makeBtn(`scroll-ctl-btn scroll-ctl-primary`, SCROLL_CTL_ICONS[which], () => setScrollPrimary(which, ctl));
+      btn.dataset.col = which;
+      btn.title = which === 'editor'
+        ? 'Editor leads scrolling (the preview follows it)'
+        : 'Preview leads scrolling (the editor follows it)';
+      btn.setAttribute('aria-label', btn.title);
+      return btn;
+    };
+
+    ctl.appendChild(primaryBtn('editor'));
+    const sync = makeBtn('scroll-ctl-btn scroll-ctl-sync', SCROLL_CTL_ICONS.sync, () => setScrollSync(!state.scrollSync, ctl));
+    sync.setAttribute('aria-label', 'Scroll sync');
+    ctl.appendChild(sync);
+    ctl.appendChild(primaryBtn('preview'));
+    updateScrollControl(ctl);
+    return ctl;
   }
 
   // Clicking in a preview remembers the spot, which the editor then marks; clicking into an
   // editor clears it, so only the column you didn't click shows a mark
   document.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !(e.target instanceof Element)) return;
-    if (e.target.closest('.btn-scroll-primary, .mark-offscreen-indicator')) return;
+    if (e.target.closest('.scroll-ctl, .mark-offscreen-indicator')) return;
     const renderCol = e.target.closest('.cell-render-column');
     if (!renderCol) {
       if (previewPick && e.target.closest('.editor-scroll-clip')) {
@@ -728,6 +803,19 @@
     const toolbar = document.querySelector('.quick-toolbar');
     const viewTop = toolbar ? toolbar.getBoundingClientRect().bottom : 0;
     const viewBottom = window.innerHeight;
+
+    // Sync off: the column scrolls in its own box, so scroll that instead of the page
+    if (state.scrollSync === false) {
+      const box = column.querySelector('.editor-scroll-clip, .markdown-preview');
+      if (!box) return;
+      const r = box.getBoundingClientRect();
+      const top = Math.max(r.top, viewTop);
+      const bottom = Math.min(r.bottom, viewBottom);
+      if (bottom - top < 40) return;
+      const half = Math.min((span.bottom - span.top) / 2, (bottom - top) / 2 - 12);
+      box.scrollBy({ top: span.top + half - (top + bottom) / 2, behavior: 'smooth' });
+      return;
+    }
     const scrollY = window.scrollY;
     const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
 
@@ -1888,7 +1976,6 @@
     barActions.className = 'editor-bar-actions';
     barActions.appendChild(btnHideComments);
     barActions.appendChild(btnBlockCounts);
-    barActions.appendChild(makeScrollPrimaryButton('editor'));
     footer.appendChild(barActions);
 
     // Per-block character counts beside the editor, aligned with the text they measure
@@ -1918,12 +2005,12 @@
     const renderCol = document.createElement('div');
     renderCol.className = 'cell-render-column';
 
-    // Sticky top bar holding the preview's scroll-lead toggle. It mirrors the editor's counter
-    // bar and keeps the same height (that bar grows when its counts wrap), so the text in both
-    // columns starts level.
+    // Sticky top bar for the preview. It mirrors the editor's counter bar and keeps the same
+    // height (that bar grows when its counts wrap), so the text in both columns starts level.
+    // It also holds the scroll control, centered on the divider with the editor.
     const renderBar = document.createElement('div');
     renderBar.className = 'render-col-bar';
-    renderBar.appendChild(makeScrollPrimaryButton('preview'));
+    renderBar.appendChild(makeScrollControls());
     renderCol.appendChild(renderBar);
     if (window.ResizeObserver) {
       new ResizeObserver(() => {
@@ -3154,13 +3241,14 @@
     clearTimeout(markIndicatorTimer);
     markIndicatorTimer = setTimeout(updateMarkIndicators, 220);
   }
-  window.addEventListener('scroll', () => {
+  // Capture phase: also catches scrolling inside the editor / preview boxes (sync off)
+  document.addEventListener('scroll', () => {
     if (markIndicatorFrame) return;
     markIndicatorFrame = requestAnimationFrame(() => {
       markIndicatorFrame = 0;
       updateMarkIndicators();
     });
-  }, { passive: true });
+  }, { passive: true, capture: true });
   window.addEventListener('resize', scheduleMarkIndicators);
 
   // --- Realtime Character & Word Counting (Excluding Commented-Out Lines) ---
