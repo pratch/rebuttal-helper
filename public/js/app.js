@@ -839,13 +839,21 @@
     if (bottom - top < 40) return;
     // A span taller than that part keeps its top near the top instead
     const half = Math.min((span.bottom - span.top) / 2, (bottom - top) / 2 - 12);
-    nudgeColumn(content, (top + bottom) / 2 - (span.top + half));
+    let by = (top + bottom) / 2 - (span.top + half);
+    // Don't slide the content's start below the top of the column (or its end above the
+    // bottom): text near either end lands off center instead of leaving the column blank
+    const c = content.getBoundingClientRect();
+    if (by > 0) by = Math.min(by, Math.max(0, top - c.top));
+    else by = Math.max(by, Math.min(0, bottom - c.bottom));
+    if (by) nudgeColumn(content, by);
   }
 
   // Column nudges: a double-click slides one column's content by itself (the CSS translate
   // property, which adds to the sync offset's transform). Scrolling the page then eases it back
-  // to zero, at half the scroll speed, so the two columns drift back into sync.
+  // to zero, at least as fast as the scroll and faster while it's large, so the columns are back
+  // in sync within a few hundred px of scrolling (a far slide used to linger off sync for pages).
   const columnNudges = new Map(); // element -> px
+  const NUDGE_FADE = 300; // px: a larger slide fades proportionally faster
   let nudgeScrollY = 0;
   function setNudge(el, px, animate) {
     el.style.transition = animate ? 'translate 0.35s ease' : '';
@@ -867,9 +875,12 @@
   }
   window.addEventListener('scroll', () => {
     if (!columnNudges.size) return;
-    const ease = Math.abs(window.scrollY - nudgeScrollY) / 2;
+    const moved = Math.abs(window.scrollY - nudgeScrollY);
     nudgeScrollY = window.scrollY;
-    [...columnNudges].forEach(([el, px]) => setNudge(el, Math.sign(px) * Math.max(0, Math.abs(px) - ease), false));
+    [...columnNudges].forEach(([el, px]) => {
+      const ease = moved * Math.max(1, Math.abs(px) / NUDGE_FADE);
+      setNudge(el, Math.sign(px) * Math.max(0, Math.abs(px) - ease), false);
+    });
   }, { passive: true });
 
   // The page scroll in [lo, hi] where missAt(S) is closest to 0: scan, then refine around the
@@ -877,22 +888,27 @@
   function bestScrollFor(missAt, lo, hi) {
     if (hi < lo) return null;
     const scrollY = window.scrollY;
-    const better = (S, best) => {
-      const m = Math.abs(missAt(S));
-      return m < best.miss - 0.5 || (Math.abs(m - best.miss) <= 0.5 && Math.abs(S - scrollY) < Math.abs(best.S - scrollY));
-    };
-    const startS = Math.min(Math.max(scrollY, lo), hi);
-    let best = { S: startS, miss: Math.abs(missAt(startS)) };
-    const step = 4;
-    for (let S = lo; S <= hi + step; S += step) {
-      const s = Math.min(S, hi);
-      if (better(s, best)) best = { S: s, miss: Math.abs(missAt(s)) };
-    }
-    for (let S = best.S - step; S <= best.S + step; S += 0.5) {
+    // Sample coarsely, then finely around the best sample (fixed bounds), and only then pick,
+    // among the samples within 0.5px of the smallest miss, the one nearest the current scroll.
+    // (Comparing ties step by step let the pick creep 0.5px at a time back to the start.)
+    const samples = [];
+    const sample = (S) => {
       const s = Math.min(Math.max(S, lo), hi);
-      if (better(s, best)) best = { S: s, miss: Math.abs(missAt(s)) };
-    }
-    return Number.isFinite(best.miss) ? best.S : null;
+      const miss = Math.abs(missAt(s));
+      if (Number.isFinite(miss)) samples.push([s, miss]);
+    };
+    sample(scrollY);
+    const step = 4;
+    for (let S = lo; S <= hi + step; S += step) sample(S);
+    if (!samples.length) return null;
+    const coarse = samples.reduce((a, b) => (b[1] < a[1] ? b : a));
+    for (let S = coarse[0] - step; S <= coarse[0] + step; S += 0.5) sample(S);
+    const min = Math.min(...samples.map(([, miss]) => miss));
+    let best = null;
+    samples.forEach(([s, miss]) => {
+      if (miss <= min + 0.5 && (best === null || Math.abs(s - scrollY) < Math.abs(best - scrollY))) best = s;
+    });
+    return best;
   }
 
   // Folding or unfolding comments changes the editor's height, and with it where both columns
@@ -2039,6 +2055,8 @@
     const btnHideComments = document.createElement('button');
     btnHideComments.type = 'button';
     btnHideComments.className = 'editor-bar-btn btn-hide-comments';
+    // Keep the editor focused, so the caret's line is the one held in place (and keeps its caret)
+    btnHideComments.addEventListener('mousedown', (e) => e.preventDefault());
     btnHideComments.addEventListener('click', () =>
       setCellHideComments(cell.id, !cellHasFolds(cell.id)));
     updateHideCommentsButton(btnHideComments, commentsHidden);
@@ -2357,10 +2375,17 @@
   // Auto-resize textarea to fit content
   function autoResizeTextarea(textarea) {
     if (!textarea) return;
-    textarea.style.height = 'auto';
+    // Measure with the old min-height cleared too: left in place it made scrollHeight at least
+    // that tall, so the editor could only ever grow (after folding or deleting text it stayed
+    // stretched, and scroll sync then lined the preview up against blank editor space)
+    const scrollY = window.scrollY;
+    textarea.style.minHeight = '0px';
+    textarea.style.height = '0px';
     const newHeight = Math.max(180, textarea.scrollHeight);
     textarea.style.minHeight = `${newHeight}px`;
     textarea.style.height = '100%';
+    // The brief collapse can clamp the page scroll near the bottom: put it back
+    if (window.scrollY !== scrollY) window.scrollTo({ top: scrollY, behavior: 'instant' });
   }
 
   // Auto-resize reviewer textarea to fit content
@@ -2754,6 +2779,7 @@
     let relStart = null;
     let relEnd = null;
     const unbind = [];
+    const binding = {};
 
     const onBeforeTransaction = () => {
       const sel = fullSelection(cellId, textarea);
@@ -2858,7 +2884,65 @@
       textarea.removeEventListener('cut', onCopy);
     });
 
-    const binding = { destroy: () => unbind.forEach(fn => fn()) };
+    // Undo/redo: the browser's own history is wiped whenever the textarea's value is replaced
+    // (folding, unfolding, a collaborator's edit), so keep the history on the Yjs text instead.
+    // It tracks only this textarea's edits, so undo never reverts other people's typing.
+    if (yText && Y.UndoManager) {
+      const history = new Y.UndoManager(yText, { trackedOrigins: new Set([binding]), captureTimeout: 500 });
+      const runHistory = (redo) => {
+        const before = yText.toString();
+        if (!(redo ? history.redo() : history.undo())) return;
+        const after = yText.toString();
+        if (before === after) return;
+        // Where the text changed: put the caret at the end of it, opening a fold it's inside
+        let p = 0;
+        const max = Math.min(before.length, after.length);
+        while (p < max && before[p] === after[p]) p++;
+        let sfx = 0;
+        while (sfx < max - p && before[before.length - 1 - sfx] === after[after.length - 1 - sfx]) sfx++;
+        const end = after.length - sfx;
+        const hit = getProjection(cellId).folds.filter(f => f.fs <= end && p <= f.fe);
+        if (hit.length) {
+          hit.forEach(f => foldKeys(cellId).delete(f.run.key));
+          saveCommentFolds();
+        }
+        const P = applyProjection(cellId, after, null);
+        const at = fullToProj(P, end, true);
+        textarea.setSelectionRange(at, at);
+        if (hit.length) refreshCommentFolds(cellId);
+        else renderEditorBackdrop(cellId);
+        socket.emit('cursor-move', { cellId, cursor: fullSelection(cellId, textarea) });
+      };
+      const onKey = (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+        const key = e.key.toLowerCase();
+        if (key !== 'z' && !(key === 'y' && !e.shiftKey)) return;
+        e.preventDefault();
+        runHistory(key === 'y' || e.shiftKey);
+      };
+      const onBeforeInput = (e) => {
+        if (e.inputType !== 'historyUndo' && e.inputType !== 'historyRedo') return;
+        e.preventDefault();
+        runHistory(e.inputType === 'historyRedo');
+      };
+      // Moving the caret starts a new undo step, as typing elsewhere is a separate change
+      const breakStep = (e) => {
+        if (e.type === 'mousedown' || /^(Arrow|Home|End|Page)/.test(e.key)) history.stopCapturing();
+      };
+      textarea.addEventListener('keydown', onKey);
+      textarea.addEventListener('keydown', breakStep);
+      textarea.addEventListener('mousedown', breakStep);
+      textarea.addEventListener('beforeinput', onBeforeInput);
+      unbind.push(() => {
+        textarea.removeEventListener('keydown', onKey);
+        textarea.removeEventListener('keydown', breakStep);
+        textarea.removeEventListener('mousedown', breakStep);
+        textarea.removeEventListener('beforeinput', onBeforeInput);
+        history.destroy();
+      });
+    }
+
+    binding.destroy = () => unbind.forEach(fn => fn());
     return binding;
   }
 
@@ -2886,12 +2970,57 @@
     renderEditorBackdrop(cellId);
   }
 
-  // Run a fold change keeping the given line of the cell where it is on screen
+  // Where a source line is drawn: its own line box, or, while it's inside a folded run, the
+  // fold's pill (the box of the run's first line, the nearest line before it with a box)
+  function lineBoxFor(cellId, line) {
+    const boxes = cellLineBoxes.get(cellId);
+    if (!boxes) return null;
+    if (boxes.has(line)) return boxes.get(line);
+    let best = -1;
+    boxes.forEach((_, l) => { if (l <= line && l > best) best = l; });
+    return best >= 0 ? boxes.get(best) : null;
+  }
+
+  // The line to hold still while folds change: the caret's line if it's on screen (the text being
+  // worked on), else the first line showing at the top of the editor's visible part
+  function editorAnchorLine(cellId) {
+    const card = document.getElementById(`cell-card-${cellId}`);
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const wrap = textarea && textarea.closest('.editor-textarea-wrapper');
+    const boxes = cellLineBoxes.get(cellId);
+    if (!card || !wrap || !boxes) return null;
+    const toolbar = document.querySelector('.quick-toolbar');
+    const footer = card.querySelector('.cell-editor-footer');
+    const clip = !state.scrollSync && card.querySelector('.editor-scroll-clip');
+    let top = Math.max(toolbar ? toolbar.getBoundingClientRect().bottom : 0, footer ? footer.getBoundingClientRect().bottom : 0);
+    let bottom = window.innerHeight;
+    if (clip) {
+      const r = clip.getBoundingClientRect();
+      top = Math.max(top, r.top);
+      bottom = Math.min(bottom, r.bottom);
+    }
+    const base = wrap.getBoundingClientRect().top;
+    if (document.activeElement === textarea) {
+      const full = cellText(cellId);
+      const caretLine = full.slice(0, fullSelection(cellId, textarea).start).split('\n').length - 1;
+      const box = lineBoxFor(cellId, caretLine);
+      if (box && base + box.bottom > top && base + box.top < bottom) return caretLine;
+    }
+    let first = null;
+    boxes.forEach((box, line) => {
+      if (base + box.bottom > top && (first === null || line < first)) first = line;
+    });
+    return first;
+  }
+
+  // Run a fold change keeping the given line of the cell where it is on screen (by default the
+  // line being worked on: see editorAnchorLine)
   function changeFoldsKeepingLine(cellId, line, change) {
     const wrap = document.querySelector(`#cell-card-${CSS.escape(cellId)} .editor-textarea-wrapper`);
-    if (!wrap) { change(); return; }
+    if (line == null) line = editorAnchorLine(cellId);
+    if (!wrap || line == null) { change(); return; }
     const lineY = () => {
-      const box = cellLineBoxes.has(cellId) && cellLineBoxes.get(cellId).get(line);
+      const box = lineBoxFor(cellId, line);
       return box ? wrap.getBoundingClientRect().top + box.top : null;
     };
     keepClickedTextInPlace(wrap, lineY, change);
@@ -2910,7 +3039,7 @@
   // The bar button: unfold everything if anything is folded, else fold everything
   function setCellHideComments(cellId, hide) {
     const runs = getCommentRuns(cellText(cellId).split('\n'));
-    changeFoldsKeepingLine(cellId, runs.length ? runs[0].start : 0, () => {
+    changeFoldsKeepingLine(cellId, null, () => {
       const keys = foldKeys(cellId);
       keys.clear();
       if (hide) runs.forEach(run => keys.add(run.key));
