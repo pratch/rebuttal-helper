@@ -38,7 +38,9 @@
     reviewerFontSize: localStorage.getItem('rh_rev_font_size') || 'md', // sm | md | lg | xl
     // Per-cell view toggles for this viewer (sets of cell ids, remembered in localStorage)
     blockCountsHiddenCells: loadCellIdSet('rh_block_counts_hidden_cells'),
-    commentsHiddenCells: loadCellIdSet('rh_comments_hidden_cells')
+    // Cells last set to "hide //" before folding came in (migrated to folds as they load)
+    commentsHiddenCells: loadCellIdSet('rh_comments_hidden_cells'),
+    commentFolds: loadCommentFolds() // cell id -> set of folded run keys
   };
 
   // Per-cell editor line boxes (source line -> {top, bottom} px from the editor's top), used to
@@ -54,6 +56,15 @@
       return new Set(JSON.parse(localStorage.getItem(key) || '[]'));
     } catch {
       return new Set();
+    }
+  }
+
+  function loadCommentFolds() {
+    try {
+      const raw = JSON.parse(localStorage.getItem('rh_comment_folds') || '{}');
+      return new Map(Object.entries(raw).map(([cellId, keys]) => [cellId, new Set(keys)]));
+    } catch {
+      return new Map();
     }
   }
 
@@ -416,7 +427,7 @@
     // belongs to that paragraph), which render nothing. So spread the rendered block over its
     // rendered source lines only, in proportion to their height: across comment lines the
     // preview pauses, and it moves through the block line by line with the real text.
-    const sourceLines = textarea.value.split('\n');
+    const sourceLines = cellText(cellId).split('\n');
     const rendered = renderedSourceLines(sourceLines);
     let anchors = [];
     blocks.forEach(block => {
@@ -679,6 +690,7 @@
   // Apply a scroll-mode change, keeping anchorEl at the same place on screen
   function changeScrollMode(change, anchorEl) {
     const before = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
+    clearColumnNudges();
     change();
     applyScrollPrimaryClass();
     buildPreviewScrollSync();
@@ -794,9 +806,9 @@
     }
   });
 
-  // Double-click text in the editor or the preview: scroll the page so the matching text in the
-  // other column sits in the middle of that column's visible part (the column clipped to the
-  // screen below the sticky toolbars)
+  // Double-click text in the editor or the preview: bring the matching text in the other column
+  // to the middle of that column's visible part (the column clipped to the screen below the
+  // sticky toolbars), moving only that column
   function centerSpanInColumn(cellId, span, contentEl) {
     const column = contentEl.closest('.cell-editor-column, .cell-render-column');
     if (!column) return;
@@ -816,40 +828,49 @@
       box.scrollBy({ top: span.top + half - (top + bottom) / 2, behavior: 'smooth' });
       return;
     }
-    const scrollY = window.scrollY;
-    const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-
-    // The column itself is in normal flow, so it moves one-for-one with the page
+    // Sync on: scrolling the page would move the column you clicked too, so slide only this
+    // column's content (on top of its sync offset), within the part of it below its sticky bar
+    const content = column.querySelector('.markdown-preview, .editor-body-row');
+    if (!content) return;
     const colRect = column.getBoundingClientRect();
-    const colTop = colRect.top + scrollY;
-    const colBottom = colRect.bottom + scrollY;
-
-    // The text moves with the page too, plus its offset curve if this column follows the other
-    const follow = moverFrames.get(cellId);
-    const following = follow && follow.el.contains(contentEl);
-    let offsetNow = 0;
-    if (following) {
-      const transform = getComputedStyle(follow.el).transform;
-      if (transform && transform !== 'none') offsetNow = new DOMMatrixReadOnly(transform).m42;
-    }
-    const spanTop = span.top + scrollY - offsetNow;
-    const spanHeight = span.bottom - span.top;
-    const offsetAt = (S) => (following ? framesValueAt(follow.frames, S) : 0);
-
-    // How far the text's middle is from the middle of the visible part of the column at scroll S
-    // (a span taller than that part keeps its top near the top instead)
-    const missAt = (S) => {
-      const top = Math.max(viewTop, colTop - S);
-      const bottom = Math.min(viewBottom, colBottom - S);
-      if (bottom - top < 40) return Infinity; // column barely on screen
-      const half = Math.min(spanHeight / 2, (bottom - top) / 2 - 12);
-      return spanTop + offsetAt(S) - S + half - (top + bottom) / 2;
-    };
-
-    // Only the scroll range where the column is on screen
-    const S = bestScrollFor(missAt, Math.max(0, colTop - viewBottom), Math.min(maxScroll, colBottom - viewTop));
-    if (S !== null) window.scrollTo({ top: S, behavior: 'smooth' });
+    const bar = column.querySelector('.cell-editor-footer, .render-col-bar');
+    const top = Math.max(colRect.top, viewTop, bar ? bar.getBoundingClientRect().bottom : viewTop);
+    const bottom = Math.min(colRect.bottom, viewBottom);
+    if (bottom - top < 40) return;
+    // A span taller than that part keeps its top near the top instead
+    const half = Math.min((span.bottom - span.top) / 2, (bottom - top) / 2 - 12);
+    nudgeColumn(content, (top + bottom) / 2 - (span.top + half));
   }
+
+  // Column nudges: a double-click slides one column's content by itself (the CSS translate
+  // property, which adds to the sync offset's transform). Scrolling the page then eases it back
+  // to zero, at half the scroll speed, so the two columns drift back into sync.
+  const columnNudges = new Map(); // element -> px
+  let nudgeScrollY = 0;
+  function setNudge(el, px, animate) {
+    el.style.transition = animate ? 'translate 0.35s ease' : '';
+    if (Math.abs(px) < 0.5 || !el.isConnected) {
+      el.style.translate = '';
+      columnNudges.delete(el);
+    } else {
+      el.style.translate = `0 ${px.toFixed(2)}px`;
+      columnNudges.set(el, px);
+    }
+  }
+  function nudgeColumn(el, by) {
+    if (!columnNudges.size) nudgeScrollY = window.scrollY;
+    setNudge(el, (columnNudges.get(el) || 0) + by, true);
+    setTimeout(scheduleMarkIndicators, 400);
+  }
+  function clearColumnNudges() {
+    [...columnNudges.keys()].forEach(el => setNudge(el, 0, false));
+  }
+  window.addEventListener('scroll', () => {
+    if (!columnNudges.size) return;
+    const ease = Math.abs(window.scrollY - nudgeScrollY) / 2;
+    nudgeScrollY = window.scrollY;
+    [...columnNudges].forEach(([el, px]) => setNudge(el, Math.sign(px) * Math.max(0, Math.abs(px) - ease), false));
+  }, { passive: true });
 
   // The page scroll in [lo, hi] where missAt(S) is closest to 0: scan, then refine around the
   // best spot, preferring the scroll position nearest the current one on ties
@@ -874,8 +895,8 @@
     return Number.isFinite(best.miss) ? best.S : null;
   }
 
-  // Revealing or hiding a cell's // comments changes the editor's height, and with it where both
-  // columns sit. Run that change while keeping the text the user clicked (anchorEl, at the y that
+  // Folding or unfolding comments changes the editor's height, and with it where both columns
+  // sit. Run that change while keeping the text the user clicked (anchorEl, at the y that
   // anchorY() reports) where it was on screen, so a click never scrolls anything.
   let anchoringDepth = 0;
   function keepClickedTextInPlace(anchorEl, anchorY, change) {
@@ -917,17 +938,11 @@
     if (Math.abs(missAt(scrollY)) < 1) return;
     const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     const S = bestScrollFor(missAt, 0, maxScroll);
-    if (S !== null && Math.abs(S - scrollY) >= 0.5) window.scrollTo({ top: S, behavior: 'instant' });
+    if (S !== null && Math.abs(S - scrollY) >= 0.5) {
+      nudgeScrollY = S; // a jump to keep text in place isn't the user scrolling: keep any nudge
+      window.scrollTo({ top: S, behavior: 'instant' });
+    }
   }
-
-  // The element under the latest click, for keeping it in place when that click hides comments
-  let lastPointerDown = null;
-  document.addEventListener('pointerdown', (e) => {
-    lastPointerDown = e.target instanceof Element ? { el: e.target, time: performance.now() } : null;
-  }, true);
-  const recentPointerTarget = () =>
-    (lastPointerDown && performance.now() - lastPointerDown.time < 1000 ? lastPointerDown.el : null);
-  const elementTop = (el) => () => (el.isConnected ? el.getBoundingClientRect().top : null);
 
   document.addEventListener('dblclick', (e) => {
     if (!(e.target instanceof Element)) return;
@@ -1241,6 +1256,7 @@
       } catch (e) {}
     });
     cellBindings.clear();
+    projections.clear();
 
     state.doc = doc;
     state.me = user;
@@ -1345,8 +1361,7 @@
 
       if (textarea && textarea !== document.activeElement) {
         // Only update textarea if user is not actively typing in it
-        textarea.value = content;
-        autoResizeTextarea(textarea);
+        applyProjection(cellId, content, null);
       }
 
       renderEditorBackdrop(cellId);
@@ -1523,13 +1538,14 @@
 
   function createCellElement(cell, index) {
     const card = document.createElement('div');
-    const commentsHidden = state.commentsHiddenCells.has(cell.id);
+    migrateHiddenComments(cell.id, cell.content || '');
+    const projection = buildProjection(cell.id, cell.content || '');
+    projections.set(cell.id, projection);
+    const commentsHidden = projection.folds.length > 0;
     const blockCountsShown = !state.blockCountsHiddenCells.has(cell.id);
     card.className = 'cell-card';
-    card.classList.toggle('comments-concealed', commentsHidden);
     card.classList.toggle('block-counts-hidden', !blockCountsShown);
     card.id = `cell-card-${cell.id}`;
-    if (commentsHidden) requestAnimationFrame(() => renderCleanView(cell.id));
     card.dataset.cellId = cell.id;
 
     // Header
@@ -1960,7 +1976,7 @@
     const textarea = document.createElement('textarea');
     textarea.id = `textarea-${cell.id}`;
     textarea.className = 'cell-textarea';
-    textarea.value = cell.content || '';
+    textarea.value = projection.text;
     textarea.placeholder = 'Type Markdown or LaTeX equations ($...$ or $$...$$)...';
     textarea.spellcheck = false;
 
@@ -1992,23 +2008,12 @@
     textareaWrap.appendChild(textarea);
     textareaWrap.appendChild(selectionPopup);
 
-    // Read-only view without // and %% lines, shown in place of the editor while comments are hidden
-    const cleanView = document.createElement('div');
-    cleanView.id = `clean-view-${cell.id}`;
-    cleanView.className = 'editor-clean-view';
-    cleanView.title = 'Comments hidden - click to edit (shows this cell\'s comments)';
-    cleanView.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      const cleanOffset = getCleanViewOffsetAt(cleanView, e.clientX, e.clientY);
-      // Keep the clicked line where it is while the comment lines around it come back
-      const line = textarea.value.slice(0, cleanOffsetToFull(textarea.value, cleanOffset)).split('\n').length - 1;
-      const lineY = () => {
-        const box = cellLineBoxes.has(cell.id) && cellLineBoxes.get(cell.id).get(line);
-        return box ? textareaWrap.getBoundingClientRect().top + box.top : null;
-      };
-      keepClickedTextInPlace(textareaWrap, lineY, () => revealCellComments(cell.id, cleanOffset));
-    });
-    textareaWrap.appendChild(cleanView);
+
+    // Fold arrows for the // comment runs, in the editor's left padding
+    const foldLayer = document.createElement('div');
+    foldLayer.id = `fold-layer-${cell.id}`;
+    foldLayer.className = 'comment-fold-layer';
+    textareaWrap.appendChild(foldLayer);
 
     textareaWrap.addEventListener('mousemove', (e) => updatePeerTagHover(cell.id, e));
     textareaWrap.addEventListener('mouseleave', () => updatePeerTagHover(cell.id, null));
@@ -2035,7 +2040,7 @@
     btnHideComments.type = 'button';
     btnHideComments.className = 'editor-bar-btn btn-hide-comments';
     btnHideComments.addEventListener('click', () =>
-      setCellHideComments(cell.id, !state.commentsHiddenCells.has(cell.id)));
+      setCellHideComments(cell.id, !cellHasFolds(cell.id)));
     updateHideCommentsButton(btnHideComments, commentsHidden);
 
     const barActions = document.createElement('div');
@@ -2099,13 +2104,17 @@
     card.appendChild(body);
 
     // Bind to Yjs Text CRDT for character-level simultaneous editing (Google Docs style)
-    if (clientYDoc && window.Y && window.TextAreaBinding) {
+    // (through the fold projection: the textarea shows folded runs as single characters)
+    if (!(clientYDoc && window.Y)) {
+      cellBindings.set(cell.id, { binding: bindFoldedTextarea(cell.id, textarea, null) });
+    } else {
       const yText = clientYDoc.getText('cell-' + cell.id);
       if (yText.length === 0 && cell.content) {
         yText.insert(0, cell.content);
       }
       try {
-        const binding = new window.TextAreaBinding(yText, textarea);
+        if (yText.toString() !== projection.full) applyProjection(cell.id, yText.toString(), null);
+        const binding = bindFoldedTextarea(cell.id, textarea, yText);
 
         const observer = () => {
           const newText = yText.toString();
@@ -2144,7 +2153,8 @@
       marker.textContent = '\u200b';
       selectionMirror.replaceChildren(document.createTextNode(textarea.value.substring(0, Math.max(start, end))), marker);
 
-      const count = Math.abs(end - start);
+      const sel = fullSelection(cell.id, textarea);
+      const count = Math.abs(sel.end - sel.start);
       selectionPopup.textContent = count.toLocaleString();
       selectionPopup.title = `${count.toLocaleString()} ${count === 1 ? 'character' : 'characters'} selected`;
       selectionPopup.hidden = false;
@@ -2162,8 +2172,8 @@
     const updateCursorLine = () => {
       let cursor = null;
       if (document.activeElement === textarea) {
-        const value = textarea.value;
-        const caret = textarea.selectionStart;
+        const value = cellText(cell.id);
+        const caret = fullSelection(cell.id, textarea).start;
         const lineStart = value.lastIndexOf('\n', caret - 1) + 1;
         const lineEndRaw = value.indexOf('\n', caret);
         const lineEnd = lineEndRaw === -1 ? value.length : lineEndRaw;
@@ -2189,7 +2199,7 @@
     );
 
     textarea.addEventListener('input', () => {
-      const text = textarea.value;
+      const text = cellText(cell.id);
       cell.content = text;
       autoResizeTextarea(textarea);
 
@@ -2202,10 +2212,7 @@
       // Emit cursor movement so collaborators see remote cursor tag
       socket.emit('cursor-move', {
         cellId: cell.id,
-        cursor: {
-          start: textarea.selectionStart,
-          end: textarea.selectionEnd
-        }
+        cursor: fullSelection(cell.id, textarea)
       });
 
       // If Yjs is not active, fallback to debounced whole-cell update
@@ -2215,20 +2222,10 @@
           socket.emit('cell-update', {
             cellId: cell.id,
             content: text,
-            cursor: {
-              start: textarea.selectionStart,
-              end: textarea.selectionEnd
-            }
+            cursor: fullSelection(cell.id, textarea)
           });
         }, 150);
       }
-    });
-
-    textarea.addEventListener('blur', (e) => {
-      // Toolbar buttons act on this editor and refocus it, so don't flip back to the clean view
-      if (e.relatedTarget && e.relatedTarget.closest('.quick-toolbar')) return;
-      const clicked = recentPointerTarget();
-      keepClickedTextInPlace(clicked, clicked && elementTop(clicked), () => concealCellComments(cell.id));
     });
 
     textarea.addEventListener('focus', () => {
@@ -2236,10 +2233,7 @@
       state.activeCellId = cell.id;
       socket.emit('cursor-move', {
         cellId: cell.id,
-        cursor: {
-          start: textarea.selectionStart,
-          end: textarea.selectionEnd
-        }
+        cursor: fullSelection(cell.id, textarea)
       });
     });
 
@@ -2247,10 +2241,7 @@
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
         socket.emit('cursor-move', {
           cellId: cell.id,
-          cursor: {
-            start: textarea.selectionStart,
-            end: textarea.selectionEnd
-          }
+          cursor: fullSelection(cell.id, textarea)
         });
       }
     });
@@ -2262,12 +2253,11 @@
     });
 
     textarea.addEventListener('click', (e) => {
+      // A click on a folded run's pill opens it
+      if (openFoldAtCaret(cell.id, textarea)) return;
       socket.emit('cursor-move', {
         cellId: cell.id,
-        cursor: {
-          start: textarea.selectionStart,
-          end: textarea.selectionEnd
-        }
+        cursor: fullSelection(cell.id, textarea)
       });
 
       // 1. Direct hit on syntax-commented-text backdrop span via coordinates
@@ -2280,7 +2270,8 @@
 
       // 2. Check via character cursor position in textarea
       setTimeout(() => {
-        checkCommentClickInEditor(cell.id, textarea.selectionStart, textarea.selectionEnd);
+        const sel = fullSelection(cell.id, textarea);
+        checkCommentClickInEditor(cell.id, sel.start, sel.end);
       }, 0);
     });
 
@@ -2594,145 +2585,403 @@
       ? state.doc.comments.filter(c => c.cellId === cellId)
       : [];
 
-    backdrop.innerHTML = buildBackdropHtml(textarea.value, cellComments);
+    backdrop.innerHTML = buildFoldedBackdropHtml(getProjection(cellId), cellComments);
     syncBackdropScroll(textarea, backdrop);
     renderBlockGutter(cellId);
-    renderCleanView(cellId);
   }
 
-  // --- Hide // Comments: per-viewer, per-cell clean view of the editor (nothing is deleted) ---
+  // --- Foldable // comments: per viewer and per cell, each run of // (or %%) lines can be folded
+  // to a one-line placeholder (nothing is deleted). The editor's textarea then holds a projection
+  // of the cell's text: every folded run stands in as one private-use character, drawn as a pill
+  // by the backdrop. Edits are mapped back onto the full text, which is what's synced and saved. ---
 
-  function updateHideCommentsButton(btn, hidden) {
-    btn.classList.toggle('active', hidden);
-    btn.setAttribute('aria-pressed', String(hidden));
-    btn.textContent = hidden ? 'Show //' : 'Hide //';
-    btn.title = hidden
-      ? 'Show // comment lines in this cell'
-      : 'Hide // comment lines in this cell (only hides them, nothing is deleted). Click into the editor to see and edit its comments.';
-  }
+  const FOLD_CHAR = '';
 
-  // Visible (non // or %%) lines of the text, with each line's offset in the full text
-  function getCleanLines(text) {
-    const lines = [];
-    let offset = 0;
-    text.split('\n').forEach(line => {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('//') && !trimmed.startsWith('%%')) lines.push({ text: line, offset });
-      offset += line.length + 1;
+  const isCommentLine = (line) => {
+    const trimmed = line.trim();
+    return trimmed.startsWith('//') || trimmed.startsWith('%%');
+  };
+
+  // Runs of consecutive comment lines: { start, end, key } (line indices). The key is the first
+  // line plus the line count, so a run that gains or loses lines (e.g. merges with a line typed
+  // next to it) opens up rather than swallowing them.
+  function getCommentRuns(lines) {
+    const runs = [];
+    lines.forEach((line, i) => {
+      if (!isCommentLine(line)) return;
+      const prev = runs[runs.length - 1];
+      if (prev && prev.end === i - 1) prev.end = i;
+      else runs.push({ start: i, end: i });
     });
-    return lines;
+    runs.forEach(run => { run.key = `${lines[run.start].trim()}\u0000${run.end - run.start + 1}`; });
+    return runs;
   }
 
-  function renderCleanView(cellId) {
-    const textarea = document.getElementById(`textarea-${cellId}`);
-    const cleanView = document.getElementById(`clean-view-${cellId}`);
-    if (!textarea || !cleanView || !state.commentsHiddenCells.has(cellId)) return;
-
-    const text = textarea.value;
-    const cleanLines = getCleanLines(text);
-    const hiddenCount = text.split('\n').length - cleanLines.length;
-    const cellComments = (state.doc && Array.isArray(state.doc.comments))
-      ? state.doc.comments.filter(c => c.cellId === cellId)
-      : [];
-
-    const body = document.createElement('div');
-    body.className = 'editor-clean-text';
-    body.innerHTML = buildBackdropHtml(cleanLines.map(l => l.text).join('\n'), cellComments);
-    const parts = [body];
-    if (hiddenCount > 0) {
-      const badge = document.createElement('span');
-      badge.className = 'editor-clean-badge';
-      badge.textContent = `${hiddenCount} // hidden`;
-      parts.push(badge);
-    }
-    cleanView.replaceChildren(...parts);
-    renderBlockGutter(cellId);
+  function saveCommentFolds() {
+    const out = {};
+    state.commentFolds.forEach((keys, cellId) => { if (keys.size) out[cellId] = [...keys]; });
+    try {
+      localStorage.setItem('rh_comment_folds', JSON.stringify(out));
+    } catch { /* storage unavailable: keep the in-memory setting */ }
   }
 
-  // Character offset within the clean text under a viewport point
-  function getCleanViewOffsetAt(cleanView, x, y) {
-    const body = cleanView.querySelector('.editor-clean-text');
-    if (!body) return 0;
-    let node = null;
-    let nodeOffset = 0;
-    if (document.caretPositionFromPoint) {
-      const pos = document.caretPositionFromPoint(x, y);
-      if (pos) { node = pos.offsetNode; nodeOffset = pos.offset; }
-    } else if (document.caretRangeFromPoint) {
-      const range = document.caretRangeFromPoint(x, y);
-      if (range) { node = range.startContainer; nodeOffset = range.startOffset; }
-    }
-    if (!node || !body.contains(node)) return body.textContent.length;
-    const range = document.createRange();
-    range.setStart(body, 0);
-    range.setEnd(node, nodeOffset);
-    return range.toString().length;
+  function foldKeys(cellId) {
+    if (!state.commentFolds.has(cellId)) state.commentFolds.set(cellId, new Set());
+    return state.commentFolds.get(cellId);
   }
 
-  // Map an offset in the clean text back to the full editor text
-  function cleanOffsetToFull(text, cleanOffset) {
-    const cleanLines = getCleanLines(text);
-    let remaining = cleanOffset;
-    for (const line of cleanLines) {
-      if (remaining <= line.text.length) return line.offset + remaining;
-      remaining -= line.text.length + 1;
-    }
-    return text.length;
-  }
+  const isRunFolded = (cellId, key) => state.commentFolds.has(cellId) && state.commentFolds.get(cellId).has(key);
 
-  function revealCellComments(cellId, cleanOffset) {
-    const card = document.getElementById(`cell-card-${cellId}`);
-    const textarea = document.getElementById(`textarea-${cellId}`);
-    if (!card || !textarea) return;
-    card.classList.remove('comments-concealed');
-    autoResizeTextarea(textarea);
-    renderEditorBackdrop(cellId);
-    renderBlockGutter(cellId);
-    const pos = cleanOffsetToFull(textarea.value, cleanOffset || 0);
-    textarea.focus({ preventScroll: true });
-    textarea.setSelectionRange(pos, pos);
-  }
-
-  function concealCellComments(cellId) {
+  // Cells set to "hide //" before runs could fold one by one start with every run folded
+  function migrateHiddenComments(cellId, text) {
     if (!state.commentsHiddenCells.has(cellId)) return;
-    const card = document.getElementById(`cell-card-${cellId}`);
-    if (!card) return;
-    renderCleanView(cellId);
-    card.classList.add('comments-concealed');
-    renderBlockGutter(cellId);
-  }
-
-  function setCellHideComments(cellId, hide) {
-    if (hide) state.commentsHiddenCells.add(cellId);
-    else state.commentsHiddenCells.delete(cellId);
+    const keys = foldKeys(cellId);
+    getCommentRuns(text.split('\n')).forEach(run => keys.add(run.key));
+    state.commentsHiddenCells.delete(cellId);
     saveCellIdSet('rh_comments_hidden_cells', state.commentsHiddenCells);
-
-    const card = document.getElementById(`cell-card-${cellId}`);
-    if (!card) return;
-    const btn = card.querySelector('.btn-hide-comments');
-    if (btn) updateHideCommentsButton(btn, hide);
-
-    const textarea = document.getElementById(`textarea-${cellId}`);
-    if (!hide) {
-      card.classList.remove('comments-concealed');
-      if (textarea) autoResizeTextarea(textarea);
-      renderEditorBackdrop(cellId);
-    } else if (document.activeElement !== textarea) {
-      concealCellComments(cellId);
-    }
+    saveCommentFolds();
   }
 
-  // An editor left revealed after a toolbar click that didn't refocus it hides again on the next outside click
-  document.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.quick-toolbar')) return;
-    document.querySelectorAll('.cell-card:not(.comments-concealed)').forEach(card => {
-      if (!state.commentsHiddenCells.has(card.dataset.cellId)) return;
-      const textarea = document.getElementById(`textarea-${card.dataset.cellId}`);
-      if (textarea && document.activeElement !== textarea && !card.querySelector('.editor-textarea-wrapper').contains(e.target)) {
-        keepClickedTextInPlace(e.target, elementTop(e.target), () => concealCellComments(card.dataset.cellId));
+  // The projection of a cell's full text: { full, text, segs, lineMap, folds }. segs cover the
+  // projected text in order: { fold, ps, pe, fs, fe } (projected and full ranges; visible
+  // stretches have equal lengths, a fold is one character standing for a whole run).
+  // lineMap[i] is the full-text line of projected line i (a fold's line maps to its first line).
+  const projections = new Map();
+
+  function buildProjection(cellId, full) {
+    const lines = full.split('\n');
+    const lineStarts = [];
+    let offset = 0;
+    lines.forEach(line => { lineStarts.push(offset); offset += line.length + 1; });
+    const foldAt = new Map();
+    getCommentRuns(lines).forEach(run => { if (isRunFolded(cellId, run.key)) foldAt.set(run.start, run); });
+
+    const segs = [];
+    const lineMap = [];
+    const folds = [];
+    let text = '';
+    const addVisible = (fs, fe) => {
+      if (fe <= fs) return;
+      const last = segs[segs.length - 1];
+      if (last && !last.fold && last.fe === fs) {
+        last.fe = fe;
+        last.pe += fe - fs;
+      } else {
+        segs.push({ fold: false, ps: text.length, pe: text.length + fe - fs, fs, fe });
       }
+      text += full.slice(fs, fe);
+    };
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0) addVisible(lineStarts[i] - 1, lineStarts[i]); // the newline before line i
+      lineMap.push(i);
+      const run = foldAt.get(i);
+      if (run) {
+        const seg = { fold: true, ps: text.length, pe: text.length + 1, fs: lineStarts[run.start], fe: lineStarts[run.end] + lines[run.end].length, run };
+        segs.push(seg);
+        folds.push(seg);
+        text += FOLD_CHAR;
+        i = run.end;
+      } else {
+        addVisible(lineStarts[i], lineStarts[i] + lines[i].length);
+      }
+    }
+    return { full, text, segs, lineMap, folds };
+  }
+
+  // Full-text offset of a projected offset (always lands on visible text or a fold's edge)
+  function projToFull(P, p) {
+    for (const seg of P.segs) {
+      if (!seg.fold && p >= seg.ps && p <= seg.pe) return seg.fs + (p - seg.ps);
+      if (seg.fold && p === seg.ps) return seg.fs;
+      if (seg.fold && p === seg.pe) return seg.fe;
+    }
+    return P.full.length;
+  }
+
+  // Projected offset of a full-text offset (inside a fold: the fold's start, or end with atEnd)
+  function fullToProj(P, f, atEnd = false) {
+    for (const seg of P.segs) {
+      if (!seg.fold && f >= seg.fs && f <= seg.fe) return seg.ps + (f - seg.fs);
+      if (seg.fold && f >= seg.fs && f <= seg.fe) return f === seg.fs ? seg.ps : (f === seg.fe || atEnd ? seg.pe : seg.ps);
+    }
+    return P.text.length;
+  }
+
+  function getProjection(cellId) {
+    if (!projections.has(cellId)) {
+      const cell = state.doc && state.doc.cells && state.doc.cells.find(c => c.id === cellId);
+      projections.set(cellId, buildProjection(cellId, (cell && cell.content) || ''));
+    }
+    return projections.get(cellId);
+  }
+
+  // The cell's real text (with every comment), whatever is folded
+  function cellText(cellId) {
+    if (projections.has(cellId)) return projections.get(cellId).full;
+    const cell = state.doc && state.doc.cells && state.doc.cells.find(c => c.id === cellId);
+    return (cell && cell.content) || '';
+  }
+
+  // The textarea's selection in full-text offsets
+  function fullSelection(cellId, textarea) {
+    const P = getProjection(cellId);
+    return { start: projToFull(P, textarea.selectionStart), end: projToFull(P, textarea.selectionEnd) };
+  }
+
+  // Put new full text (or new folds) into the textarea, keeping the selection on the same text
+  function applyProjection(cellId, full, selection) {
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const P = buildProjection(cellId, full);
+    projections.set(cellId, P);
+    if (!textarea) return P;
+    if (textarea.value !== P.text) {
+      const focused = document.activeElement === textarea;
+      const direction = textarea.selectionDirection;
+      textarea.value = P.text;
+      if (selection && focused) {
+        textarea.setSelectionRange(fullToProj(P, selection.start), fullToProj(P, selection.end, true), direction || 'none');
+      }
+      autoResizeTextarea(textarea);
+    }
+    return P;
+  }
+
+  // Binds a cell's textarea to its full text (a Yjs text when collaborating, else just local):
+  // typing in the projection becomes edits of the full text, and remote edits re-project.
+  function bindFoldedTextarea(cellId, textarea, yText) {
+    const doc = yText ? yText.doc : null;
+    const Y = window.Y;
+    let relStart = null;
+    let relEnd = null;
+    const unbind = [];
+
+    const onBeforeTransaction = () => {
+      const sel = fullSelection(cellId, textarea);
+      relStart = Y.createRelativePositionFromTypeIndex(yText, sel.start);
+      relEnd = Y.createRelativePositionFromTypeIndex(yText, sel.end);
+    };
+    const onRemote = (event, transaction) => {
+      if (transaction.origin === binding) return;
+      let selection = null;
+      if (relStart && relEnd) {
+        const s = Y.createAbsolutePositionFromRelativePosition(relStart, doc);
+        const e = Y.createAbsolutePositionFromRelativePosition(relEnd, doc);
+        if (s && e) selection = { start: s.index, end: e.index };
+      }
+      applyProjection(cellId, yText.toString(), selection);
+    };
+    if (yText) {
+      doc.on('beforeTransaction', onBeforeTransaction);
+      yText.observe(onRemote);
+      unbind.push(() => doc.off('beforeTransaction', onBeforeTransaction), () => yText.unobserve(onRemote));
+    }
+
+    const onInput = () => {
+      const P = getProjection(cellId);
+      const oldText = P.text;
+      const newText = textarea.value;
+      if (oldText === newText) return;
+
+      // The changed stretch: [a, b) of the old text became ins (anchored at the caret)
+      const caret = textarea.selectionEnd;
+      let suffix = 0;
+      const maxSuffix = Math.min(oldText.length, newText.length - caret);
+      while (suffix < maxSuffix && oldText[oldText.length - 1 - suffix] === newText[newText.length - 1 - suffix]) suffix++;
+      let a = 0;
+      const maxPrefix = Math.min(oldText.length, newText.length) - suffix;
+      while (a < maxPrefix && oldText[a] === newText[a]) a++;
+      const b = oldText.length - suffix;
+      let ins = newText.slice(a, newText.length - suffix);
+
+      const removed = P.folds.filter(f => f.ps >= a && f.ps < b);
+      const unfold = [];
+
+      // Backspace or Delete on a fold opens it instead of deleting the run
+      if (removed.length === 1 && b - a === 1 && !ins) {
+        foldKeys(cellId).delete(removed[0].run.key);
+        saveCommentFolds();
+        const P2 = applyProjection(cellId, P.full, null);
+        textarea.value = P2.text;
+        const at = fullToProj(P2, removed[0].fs);
+        textarea.setSelectionRange(at, at);
+        renderEditorBackdrop(cellId);
+        return;
+      }
+      // Fold characters kept in the new text (an edit that rewrites lines around a fold) stand
+      // for the same runs; any others removed are deleted with their runs
+      let k = 0;
+      ins = ins.replace(new RegExp(FOLD_CHAR, 'g'), () => (k < removed.length ? P.full.slice(removed[k].fs, removed[k++].fe) : ''));
+      // Typing onto a fold's line (not just a line break beside it) goes into its run, so open it
+      if (a === b && /[^\n]/.test(ins)) {
+        P.folds.filter(f => f.ps === a || f.pe === a).forEach(f => unfold.push(f.run.key));
+      }
+
+      const fa = projToFull(P, a);
+      const fb = projToFull(P, b);
+      const full = P.full.slice(0, fa) + ins + P.full.slice(fb);
+      if (yText) {
+        doc.transact(() => {
+          if (fb > fa) yText.delete(fa, fb - fa);
+          if (ins) yText.insert(fa, ins);
+        }, binding);
+      }
+      if (unfold.length) {
+        unfold.forEach(key => foldKeys(cellId).delete(key));
+        saveCommentFolds();
+      }
+      const caretFull = fa + ins.length;
+      const P2 = applyProjection(cellId, full, null);
+      if (textarea.value !== P2.text || unfold.length) {
+        textarea.value = P2.text;
+        const at = fullToProj(P2, caretFull, true);
+        textarea.setSelectionRange(at, at);
+      }
+    };
+    textarea.addEventListener('input', onInput);
+    unbind.push(() => textarea.removeEventListener('input', onInput));
+
+    // Copy and cut carry the full text, comments and all
+    const onCopy = (e) => {
+      if (textarea.selectionStart === textarea.selectionEnd || !e.clipboardData) return;
+      const sel = fullSelection(cellId, textarea);
+      e.clipboardData.setData('text/plain', cellText(cellId).slice(sel.start, sel.end));
+      e.preventDefault();
+      if (e.type === 'cut') {
+        textarea.setRangeText('', textarea.selectionStart, textarea.selectionEnd, 'start');
+        textarea.dispatchEvent(new Event('input'));
+      }
+    };
+    textarea.addEventListener('copy', onCopy);
+    textarea.addEventListener('cut', onCopy);
+    unbind.push(() => {
+      textarea.removeEventListener('copy', onCopy);
+      textarea.removeEventListener('cut', onCopy);
     });
-  });
+
+    const binding = { destroy: () => unbind.forEach(fn => fn()) };
+    return binding;
+  }
+
+  function cellHasFolds(cellId) {
+    return getProjection(cellId).folds.length > 0;
+  }
+
+  function updateHideCommentsButton(btn, anyFolded) {
+    btn.classList.toggle('active', anyFolded);
+    btn.setAttribute('aria-pressed', String(anyFolded));
+    btn.textContent = anyFolded ? 'Unfold //' : 'Fold //';
+    btn.title = anyFolded
+      ? 'Unfold every // comment run in this cell'
+      : 'Fold every // comment run in this cell (only hides them, nothing is deleted). Fold or unfold one run with the arrow beside it.';
+  }
+
+  // Re-project after the folds changed, keeping the selection on the same text
+  function refreshCommentFolds(cellId) {
+    const textarea = document.getElementById(`textarea-${cellId}`);
+    const selection = textarea ? fullSelection(cellId, textarea) : null;
+    applyProjection(cellId, cellText(cellId), selection);
+    const card = document.getElementById(`cell-card-${cellId}`);
+    const btn = card && card.querySelector('.btn-hide-comments');
+    if (btn) updateHideCommentsButton(btn, cellHasFolds(cellId));
+    renderEditorBackdrop(cellId);
+  }
+
+  // Run a fold change keeping the given line of the cell where it is on screen
+  function changeFoldsKeepingLine(cellId, line, change) {
+    const wrap = document.querySelector(`#cell-card-${CSS.escape(cellId)} .editor-textarea-wrapper`);
+    if (!wrap) { change(); return; }
+    const lineY = () => {
+      const box = cellLineBoxes.has(cellId) && cellLineBoxes.get(cellId).get(line);
+      return box ? wrap.getBoundingClientRect().top + box.top : null;
+    };
+    keepClickedTextInPlace(wrap, lineY, change);
+  }
+
+  // Fold or unfold one run
+  function setCommentRunFolded(cellId, run, fold) {
+    changeFoldsKeepingLine(cellId, run.start, () => {
+      if (fold) foldKeys(cellId).add(run.key);
+      else foldKeys(cellId).delete(run.key);
+      saveCommentFolds();
+      refreshCommentFolds(cellId);
+    });
+  }
+
+  // The bar button: unfold everything if anything is folded, else fold everything
+  function setCellHideComments(cellId, hide) {
+    const runs = getCommentRuns(cellText(cellId).split('\n'));
+    changeFoldsKeepingLine(cellId, runs.length ? runs[0].start : 0, () => {
+      const keys = foldKeys(cellId);
+      keys.clear();
+      if (hide) runs.forEach(run => keys.add(run.key));
+      saveCommentFolds();
+      refreshCommentFolds(cellId);
+    });
+  }
+
+  // Clicking a fold's pill (its line in the textarea) opens it
+  function openFoldAtCaret(cellId, textarea) {
+    if (textarea.selectionStart !== textarea.selectionEnd) return false;
+    const P = getProjection(cellId);
+    const caret = textarea.selectionStart;
+    const fold = P.folds.find(f => f.ps === caret || f.pe === caret);
+    if (!fold) return false;
+    const caretFull = fold.fs;
+    setCommentRunFolded(cellId, fold.run, false);
+    const P2 = getProjection(cellId);
+    const at = fullToProj(P2, caretFull);
+    textarea.setSelectionRange(at, at);
+    return true;
+  }
+
+  // Backdrop HTML for the projection: the text with each fold as a pill on its own line
+  function buildFoldedBackdropHtml(P, cellComments) {
+    if (!P.folds.length) return buildBackdropHtml(P.text, cellComments);
+    const lines = P.full.split('\n');
+    const parts = [];
+    let from = 0;
+    P.folds.forEach(f => {
+      // The text before a fold ends with the newline into the fold's line, for which the built
+      // HTML ends in a <br> (only right at the very end does a textarea show that extra line)
+      const html = buildBackdropHtml(P.text.slice(from, f.ps), cellComments);
+      parts.push(html.endsWith('<br>') ? html.slice(0, -4) : html);
+      const { start, end } = f.run;
+      const label = lines.slice(start, end + 1).map(l => l.trim())
+        .find(l => l.replace(/^(\/\/|%%)/, '').trim()) || lines[start].trim();
+      const more = end > start ? `<span class="fold-pill-count">+${end - start} line${end - start > 1 ? 's' : ''}</span>` : '';
+      parts.push(`<span class="fold-pill"><span class="fold-pill-text">${escapeHtml(label)}</span>${more}</span>`);
+      from = f.pe;
+    });
+    parts.push(buildBackdropHtml(P.text.slice(from), cellComments));
+    return parts.join('');
+  }
+
+  // Fold arrows beside each run, laid out from the measured line boxes
+  function renderFoldToggles(cellId) {
+    const layer = document.getElementById(`fold-layer-${cellId}`);
+    if (!layer) return;
+    const boxes = cellLineBoxes.get(cellId);
+    const toggles = getCommentRuns(cellText(cellId).split('\n')).map(run => {
+      const box = boxes && boxes.get(run.start);
+      if (!box) return null;
+      const folded = isRunFolded(cellId, run.key);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `comment-fold-toggle${folded ? ' is-folded' : ''}`;
+      btn.style.top = `${box.top}px`;
+      const count = run.end - run.start + 1;
+      btn.title = `${folded ? 'Unfold' : 'Fold'} ${count} comment line${count === 1 ? '' : 's'}`;
+      btn.setAttribute('aria-label', btn.title);
+      btn.innerHTML = '<svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M2.5 3.5 5 6.5 7.5 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      btn.addEventListener('mousedown', (e) => e.preventDefault()); // keep the editor's focus
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setCommentRunFolded(cellId, run, !folded);
+      });
+      return btn;
+    }).filter(Boolean);
+    layer.replaceChildren(...toggles);
+  }
 
   function renderBlockGutter(cellId) {
     const textarea = document.getElementById(`textarea-${cellId}`);
@@ -2740,18 +2989,15 @@
     const mirror = document.getElementById(`measure-mirror-${cellId}`);
     if (!textarea || !gutter || !mirror) return;
 
-    // While // comments are hidden, measure against the clean view (comment lines dropped)
-    const card = document.getElementById(`cell-card-${cellId}`);
-    const concealed = !!card && card.classList.contains('comments-concealed');
-    const allLines = textarea.value.split('\n');
-    const lineNumbers = allLines.map((_, i) => i).filter(i => {
-      const trimmed = allLines[i].trim();
-      return !concealed || (!trimmed.startsWith('//') && !trimmed.startsWith('%%'));
-    });
-    const lines = lineNumbers.map(i => allLines[i]);
+    // Measure the projected text the textarea shows: a folded run is one line, keyed by its
+    // first line and counted as nothing
+    const P = getProjection(cellId);
+    const lineNumbers = P.lineMap;
+    const mirrorTexts = P.text.split('\n');
+    const lines = mirrorTexts.map(line => (line === FOLD_CHAR ? '' : line));
 
     // Lay the text out in the hidden mirror, one span per line, to find where each line wraps
-    const lineSpans = lines.map(line => {
+    const lineSpans = mirrorTexts.map(line => {
       const span = document.createElement('span');
       span.textContent = line;
       return span;
@@ -2775,6 +3021,7 @@
     });
     cellLineBoxes.set(cellId, lineBoxes);
     schedulePreviewScrollSync();
+    renderFoldToggles(cellId);
 
     const items = getTextBlocks(lines).map(block => {
       const firstRects = lineSpans[block.startLine].getClientRects();
@@ -2854,9 +3101,10 @@
     if (cellComments.length === 0) return;
 
     const textarea = document.getElementById(`textarea-${cellId}`);
-    const content = textarea ? textarea.value : (cell.content || '');
-    const clickPos = start !== undefined ? start : (textarea ? textarea.selectionStart : 0);
-    const endPos = end !== undefined ? end : (textarea ? textarea.selectionEnd : clickPos);
+    const content = cellText(cellId);
+    const sel = textarea ? fullSelection(cellId, textarea) : { start: 0, end: 0 };
+    const clickPos = start !== undefined ? start : sel.start;
+    const endPos = end !== undefined ? end : sel.end;
 
     for (const comment of cellComments) {
       const target = comment.highlightedText.trim();
@@ -3014,7 +3262,7 @@
   // row's characters onto the rendered text proportionally (by visible units), then take the
   // lines those characters sit on
   function previewRowSpan(target, textarea, cursor, firstLine, lastLine) {
-    const lines = textarea.value.split('\n');
+    const lines = cellText(textarea.id.replace(/^textarea-/, '')).split('\n');
     let offset = 0;
     const srcUnits = [];
     lines.forEach((text, i) => {
@@ -3155,7 +3403,7 @@
     const lineBoxes = cellLineBoxes.get(cellId);
     const textarea = document.getElementById(`textarea-${cellId}`);
     if (!lineBoxes || !textarea) return null;
-    const rendered = renderedSourceLines(textarea.value.split('\n'));
+    const rendered = renderedSourceLines(cellText(cellId).split('\n'));
     let top = Infinity;
     let bottom = -Infinity;
     for (let line = first; line <= last; line++) {
@@ -3415,7 +3663,10 @@
           pill.addEventListener('click', () => {
             const targetCard = document.getElementById(`cell-card-${cellId}`);
             if (targetCard) {
-              targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              // Bring the reply's top just under the sticky toolbars
+              const toolbar = document.querySelector('.quick-toolbar');
+              const viewTop = toolbar ? toolbar.getBoundingClientRect().bottom : 0;
+              window.scrollTo({ top: window.scrollY + targetCard.getBoundingClientRect().top - viewTop - 12, behavior: 'smooth' });
               targetCard.classList.remove('flash-highlight');
               void targetCard.offsetWidth; // retrigger css animation
               targetCard.classList.add('flash-highlight');
@@ -3563,7 +3814,7 @@
       const textarea = document.getElementById(`textarea-${cellId}`);
       if (cursorOverlay && textarea && cursor) {
         const text = textarea.value || '';
-        const cursorPos = Math.min(cursor.start || 0, text.length);
+        const cursorPos = Math.min(fullToProj(getProjection(cellId), cursor.start || 0), text.length);
 
         const beforeText = text.substring(0, cursorPos);
         const afterText = text.substring(cursorPos);
@@ -3928,8 +4179,7 @@
 
   // Live answer text for a cell; stripComments drops the same comments the char counter excludes
   function getCellAnswerText(cell, stripComments) {
-    const liveTextarea = document.querySelector(`textarea[data-cell-id="${cell.id}"]`);
-    const raw = liveTextarea ? liveTextarea.value : (cell.content || '');
+    const raw = projections.has(cell.id) ? cellText(cell.id) : (cell.content || '');
     return (stripComments ? getCountableText(raw) : raw).trim();
   }
 
@@ -4101,8 +4351,10 @@ ${renderedParts}
     const field = document.activeElement;
     const inField = field && field.tagName === 'TEXTAREA' && field.selectionStart !== field.selectionEnd;
     const selection = window.getSelection();
+    const fieldCellId = inField && field.classList.contains('cell-textarea') ? field.id.replace(/^textarea-/, '') : null;
+    const fieldSel = fieldCellId ? fullSelection(fieldCellId, field) : null;
     const selectedText = inField
-      ? field.value.substring(field.selectionStart, field.selectionEnd).trim()
+      ? (fieldSel ? cellText(fieldCellId).substring(fieldSel.start, fieldSel.end) : field.value.substring(field.selectionStart, field.selectionEnd)).trim()
       : (selection ? selection.toString().trim() : '');
 
     if (!selectedText || selectedText.length < 2) {
@@ -4366,11 +4618,20 @@ ${renderedParts}
           // 2. Also highlight and select the exact text in the editor textarea
           const textarea = document.getElementById(`textarea-${c.cellId}`);
           if (textarea && c.highlightedText) {
-            const fullText = textarea.value;
+            const fullText = cellText(c.cellId);
             const idx = fullText.indexOf(c.highlightedText);
             if (idx !== -1) {
+              // Open any fold the text sits in, then select it
+              const P = getProjection(c.cellId);
+              const inFold = P.folds.filter(f => f.fs < idx + c.highlightedText.length && idx < f.fe);
+              if (inFold.length) {
+                inFold.forEach(f => foldKeys(c.cellId).delete(f.run.key));
+                saveCommentFolds();
+                refreshCommentFolds(c.cellId);
+              }
+              const P2 = getProjection(c.cellId);
               textarea.focus();
-              textarea.setSelectionRange(idx, idx + c.highlightedText.length);
+              textarea.setSelectionRange(fullToProj(P2, idx), fullToProj(P2, idx + c.highlightedText.length, true));
               const wrap = textarea.closest('.editor-textarea-wrapper') || textarea;
               wrap.classList.remove('textarea-comment-flash');
               void wrap.offsetWidth; // trigger reflow

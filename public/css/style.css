@@ -1904,47 +1904,81 @@ body.scroll-primary-preview .editor-body-row {
   display: none;
 }
 
-/* Hide // comments: the editor layers give way to a read-only clean view until clicked */
-.editor-clean-view {
-  display: none;
-}
-
-/* The selection mirror stays (it is invisible) so block counts can be measured against the clean view */
-.cell-card.comments-concealed .editor-textarea-wrapper > :not(.editor-clean-view):not(.editor-selection-mirror) {
-  display: none;
-}
-
-.cell-card.comments-concealed .editor-clean-view {
-  display: block;
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  min-height: 180px;
+/* A folded // run: the textarea holds one hidden character on its line, and the backdrop
+   draws a pill there with the run's first line */
+.fold-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.6em;
+  max-width: 100%;
   box-sizing: border-box;
-  padding: 1rem 1.25rem;
-  font-family: var(--font-mono);
-  font-size: 0.88rem;
-  line-height: 1.6;
-  tab-size: 2;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-primary);
-  cursor: text;
-}
-
-.editor-clean-badge {
-  position: absolute;
-  top: 0.35rem;
-  right: 0.5rem;
-  padding: 0.05rem 0.4rem;
+  height: 1.6em;
+  padding: 0 0.6em;
+  border: 1px dashed var(--border-color);
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  line-height: calc(1.6em - 2px);
+  vertical-align: top;
   white-space: nowrap;
-  pointer-events: none;
-  user-select: none;
+  overflow: hidden;
+}
+
+.fold-pill-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+}
+
+.fold-pill-count {
+  flex: none;
+  font-family: var(--font-sans);
+  font-size: 0.8em;
+  opacity: 0.85;
+}
+
+/* Fold arrows: in the editor's left padding, beside each // run's first line */
+.comment-fold-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  z-index: 4;
+}
+
+.comment-fold-toggle {
+  position: absolute;
+  left: 3px;
+  width: 16px;
+  height: calc(0.88rem * 1.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0.45;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.comment-fold-toggle svg {
+  transition: transform 0.15s ease;
+}
+
+.comment-fold-toggle.is-folded svg {
+  transform: rotate(-90deg);
+}
+
+.comment-fold-toggle:hover,
+.comment-fold-toggle:focus-visible {
+  opacity: 1;
+  color: var(--accent-primary);
+  background: var(--bg-tertiary);
 }
 
 .editor-bar-actions {
