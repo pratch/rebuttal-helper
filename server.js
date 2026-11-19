@@ -252,13 +252,74 @@ function saveDocument(docId, doc, immediate = false) {
   }
 }
 
+// --- Cache busting ---
+// index.html is sent with every local script and stylesheet URL stamped with ?v=<hash of the
+// file's content>, and is itself never reused without revalidating. So after a deploy, a reload
+// always gets the new HTML, whose changed asset URLs miss any stale cached copy. Stamped assets
+// are cached for a year (a new version gets a new URL); anything else must revalidate (ETag).
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const STATIC_MOUNTS = [
+  ['/vendor/katex/', path.join(__dirname, 'node_modules/katex/dist')],
+  ['/vendor/marked/', path.join(__dirname, 'node_modules/marked/lib')],
+  ['/vendor/dompurify/', path.join(__dirname, 'node_modules/dompurify/dist')],
+  ['/', PUBLIC_DIR]
+];
+
+// The file an asset URL path is served from, or null
+function assetFilePath(urlPath) {
+  for (const [prefix, dir] of STATIC_MOUNTS) {
+    if (!urlPath.startsWith(prefix)) continue;
+    const file = path.normalize(path.join(dir, urlPath.slice(prefix.length)));
+    if (!file.startsWith(dir + path.sep)) return null;
+    return fs.existsSync(file) ? file : null;
+  }
+  return null;
+}
+
+// Content hash of a file, recomputed only when its size or modification time changes
+const assetHashes = new Map(); // file -> { key, hash }
+function assetVersion(file) {
+  try {
+    const stat = fs.statSync(file);
+    const key = `${stat.size}:${stat.mtimeMs}`;
+    const cached = assetHashes.get(file);
+    if (cached && cached.key === key) return cached.hash;
+    const hash = require('crypto').createHash('sha1').update(fs.readFileSync(file)).digest('hex').slice(0, 10);
+    assetHashes.set(file, { key, hash });
+    return hash;
+  } catch (e) {
+    return null;
+  }
+}
+
+function renderIndexHtml() {
+  const html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  return html.replace(/(\s(?:src|href)=")(\/[^"?#]+\.(?:js|css))"/g, (match, attr, urlPath) => {
+    const file = assetFilePath(urlPath);
+    const version = file && assetVersion(file);
+    return version ? `${attr}${urlPath}?v=${version}"` : match;
+  });
+}
+
+app.get(['/', '/index.html'], (req, res) => {
+  res.set('Cache-Control', 'no-cache');
+  res.type('html').send(renderIndexHtml());
+});
+
+const staticOptions = {
+  setHeaders: (res) => {
+    const versioned = res.req && res.req.query && res.req.query.v;
+    res.setHeader('Cache-Control', versioned ? 'public, max-age=31536000, immutable' : 'no-cache');
+  }
+};
+
 // Serve node_modules assets locally for offline self-containment
-app.use('/vendor/katex', express.static(path.join(__dirname, 'node_modules/katex/dist')));
-app.use('/vendor/marked', express.static(path.join(__dirname, 'node_modules/marked/lib')));
-app.use('/vendor/dompurify', express.static(path.join(__dirname, 'node_modules/dompurify/dist')));
+app.use('/vendor/katex', express.static(path.join(__dirname, 'node_modules/katex/dist'), staticOptions));
+app.use('/vendor/marked', express.static(path.join(__dirname, 'node_modules/marked/lib'), staticOptions));
+app.use('/vendor/dompurify', express.static(path.join(__dirname, 'node_modules/dompurify/dist'), staticOptions));
 
 // Serve static frontend
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(PUBLIC_DIR, staticOptions));
 app.use(express.json());
 
 // REST API for doc export / info
